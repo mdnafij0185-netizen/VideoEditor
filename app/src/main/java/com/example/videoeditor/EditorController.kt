@@ -163,7 +163,7 @@ class EditorController(
     }
 
     // ---------- preview quality ----------
-    fun setQuality(q: Quality) {
+    fun changeQuality(q: Quality) {
         quality = q
         applyQuality()
     }

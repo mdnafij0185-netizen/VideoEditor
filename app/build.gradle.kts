@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.videoeditor"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "3.0"
     }
 
     compileOptions {
@@ -43,6 +43,7 @@ dependencies {
     implementation("androidx.media3:media3-effect:1.3.1")
     implementation("androidx.media3:media3-transformer:1.3.1")
     implementation("androidx.media3:media3-common:1.3.1")
+    implementation("androidx.core:core-ktx:1.13.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 }

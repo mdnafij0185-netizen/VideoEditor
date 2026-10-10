@@ -15,7 +15,7 @@ fun fmt(ms: Long): String {
 data class Msg(val bn: String, val en: String)
 
 enum class P { SCALE, POSX, POSY, BLUR }
-enum class Eff { TRANSFORM, FLIP, BLUR, DENOISE }
+enum class Eff { TRANSFORM, FLIP_H, FLIP_V, BLUR, CROP, BW, COLOR, DENOISE }
 
 @Serializable
 data class Keyframe(val tMs: Long, val value: Float)
@@ -71,8 +71,19 @@ data class Fx(
     val posX: Param = Param(0f),
     val posY: Param = Param(0f),
     val flipH: Boolean = false,
+    val flipV: Boolean = false,
     val blurOn: Boolean = false,
     val blur: Param = Param(10f),
+    val cropOn: Boolean = false,
+    val cropL: Float = 0f,
+    val cropR: Float = 0f,
+    val cropT: Float = 0f,
+    val cropB: Float = 0f,
+    val bwOn: Boolean = false,
+    val colorOn: Boolean = false,
+    val bright: Float = 0f,
+    val contrast: Float = 0f,
+    val sat: Float = 0f,
     val denoiseOn: Boolean = false,
     val denoise: Float = 50f
 )
@@ -98,6 +109,37 @@ fun Fx.shifted(by: Long): Fx = copy(
     blur = blur.shifted(by)
 )
 
+/** Scale (sx, sy) and translation (tx, ty in NDC: x right, y up) used by both preview and export. */
+class Geo(val sx: Float, val sy: Float, val tx: Float, val ty: Float)
+
+fun Fx.geometry(tMs: Long): Geo {
+    var s = 1f
+    var tx = 0f
+    var ty = 0f
+    if (transformOn) {
+        s = scale.at(tMs) / 100f
+        tx = posX.at(tMs) / 100f * 2f
+        ty = -posY.at(tMs) / 100f * 2f
+    }
+    var cs = 1f
+    var cx = 0f
+    var cy = 0f
+    if (cropOn) {
+        val wf = (1f - (cropL + cropR) / 100f).coerceAtLeast(0.1f)
+        val hf = (1f - (cropT + cropB) / 100f).coerceAtLeast(0.1f)
+        cs = maxOf(1f / wf, 1f / hf)
+        cx = -cs * (cropL - cropR) / 100f
+        cy = cs * (cropT - cropB) / 100f
+    }
+    val total = s * cs
+    return Geo(
+        sx = if (flipH) -total else total,
+        sy = if (flipV) -total else total,
+        tx = s * cx + tx,
+        ty = s * cy + ty
+    )
+}
+
 @Serializable
 data class MediaRef(
     val id: String,
@@ -116,25 +158,61 @@ data class Clip(
     val srcDurMs: Long,
     val inMs: Long,
     val outMs: Long,
+    val speed: Float = 1f,
     val fx: Fx = Fx()
 ) {
-    val durMs: Long get() = outMs - inMs
+    val durMs: Long get() = ((outMs - inMs) / speed).toLong().coerceAtLeast(1L)
+}
+
+@Serializable
+data class TextClip(
+    val id: String = newId(),
+    val text: String = "Your text",
+    val startMs: Long = 0L,
+    val durMs: Long = 3000L,
+    val font: String = "bebas_neue",
+    val color: Long = 0xFFFFFFFFL,
+    val sizePct: Float = 8f,
+    val posX: Float = 0f,
+    val posY: Float = 60f
+)
+
+@Serializable
+data class Seq(
+    val id: String = newId(),
+    val name: String = "Sequence 1",
+    val ratio: String = "16:9",
+    val video: List<Clip> = emptyList(),
+    val audio: List<List<Clip>> = listOf(emptyList(), emptyList()),
+    val texts: List<TextClip> = emptyList()
+) {
+    val totalMs: Long get() = video.sumOf { it.durMs }
+    val aspect: Float
+        get() = when (ratio) {
+            "9:16" -> 9f / 16f
+            "4:3" -> 4f / 3f
+            else -> 16f / 9f
+        }
+    val lengthMs: Long
+        get() {
+            val a = audio.maxOfOrNull { t -> t.sumOf { it.durMs } } ?: 0L
+            val t = texts.maxOfOrNull { it.startMs + it.durMs } ?: 0L
+            return maxOf(totalMs, a, t)
+        }
 }
 
 @Serializable
 data class Project(
     val id: String,
     val name: String,
-    val seqName: String = "Sequence 1",
     val media: List<MediaRef> = emptyList(),
-    val video: List<Clip> = emptyList(),
-    val audio: List<Clip> = emptyList(),
+    val seqs: List<Seq> = listOf(Seq()),
     val modified: Long = 0L
 ) {
-    val totalMs: Long get() = video.sumOf { it.durMs }
+    val totalMs: Long get() = seqs.firstOrNull()?.totalMs ?: 0L
 }
 
-/** Returns (clip index, offset inside clip in ms) for a time on the sequence. clips must not be empty. */
+/** Returns (clip index, offset inside the clip on the timeline in ms). clips must not be empty. */
 fun locate(clips: List<Clip>, ms: Long): Pair<Int, Long> {
     var acc = 0L
     for (i in clips.indices) {
@@ -144,4 +222,22 @@ fun locate(clips: List<Clip>, ms: Long): Pair<Int, Long> {
     }
     val last = clips.lastIndex
     return Pair(last, (clips[last].durMs - 1).coerceAtLeast(0L))
+}
+
+fun startOf(clips: List<Clip>, index: Int): Long = clips.take(index).sumOf { it.durMs }
+
+/** Index to insert a new clip at: the clip boundary nearest to the given time. */
+fun insertIndexAt(clips: List<Clip>, ms: Long): Int {
+    var acc = 0L
+    var best = 0
+    var bestDist = abs(ms - 0L)
+    for (i in clips.indices) {
+        acc += clips[i].durMs
+        val d = abs(ms - acc)
+        if (d < bestDist) {
+            bestDist = d
+            best = i + 1
+        }
+    }
+    return best
 }

@@ -16,6 +16,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -35,7 +42,6 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -54,10 +60,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-val BG = Color(0xFF0D0D0D)
-val PANEL = Color(0xFF161616)
-val ACCENT = Color(0xFF2F5FA8)
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,26 +74,49 @@ fun App() {
     val store = remember { ProjectStore(ctx) }
     val device = remember { deviceInfo(ctx) }
     var lang by remember { mutableStateOf(prefs.lang) }
+    var accent by remember { mutableStateOf(prefs.accent) }
+    var qualityPref by remember { mutableStateOf(prefs.quality) }
+    var tlPref by remember { mutableStateOf(prefs.timeline) }
     var open by remember { mutableStateOf<Project?>(null) }
 
-    MaterialTheme(colorScheme = darkColorScheme()) {
+    MaterialTheme(colorScheme = rvedtColors(Accents[accent.coerceIn(0, Accents.size - 1)])) {
         CompositionLocalProvider(LocalBn provides (lang == "bn")) {
-            Surface(modifier = Modifier.fillMaxSize(), color = BG) {
+            Surface(modifier = Modifier.fillMaxSize(), color = Bg) {
                 val p = open
                 if (p == null) {
                     HomeScreen(
                         store = store,
                         device = device,
                         lang = lang,
+                        accent = accent,
+                        qualityPref = qualityPref,
+                        tlPref = tlPref,
                         onLang = {
                             lang = it
                             prefs.lang = it
+                        },
+                        onAccent = {
+                            accent = it
+                            prefs.accent = it
+                        },
+                        onQuality = {
+                            qualityPref = it
+                            prefs.quality = it
+                        },
+                        onTimeline = {
+                            tlPref = it
+                            prefs.timeline = it
                         },
                         onOpen = { open = it }
                     )
                 } else {
                     key(p.id) {
-                        EditorScreen(p, store, device, onBack = { open = null })
+                        val tlH: Dp = when (tlPref) {
+                            0 -> 168.dp
+                            2 -> 230.dp
+                            else -> 190.dp
+                        }
+                        EditorScreen(p, store, qualityFromPref(qualityPref, device), tlH, onBack = { open = null })
                     }
                 }
             }
@@ -104,7 +129,13 @@ fun HomeScreen(
     store: ProjectStore,
     device: Device,
     lang: String,
+    accent: Int,
+    qualityPref: Int,
+    tlPref: Int,
     onLang: (String) -> Unit,
+    onAccent: (Int) -> Unit,
+    onQuality: (Int) -> Unit,
+    onTimeline: (Int) -> Unit,
     onOpen: (Project) -> Unit
 ) {
     var projects by remember { mutableStateOf(store.list()) }
@@ -124,7 +155,7 @@ fun HomeScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(tr("ভিডিও এডিটর", "Video Editor"), fontSize = 22.sp, fontWeight = FontWeight.Medium)
+            Text("RVEDT", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             IconButton(onClick = { showSettings = true }) {
                 Icon(Icons.Filled.Settings, contentDescription = tr("সেটিংস", "Settings"))
             }
@@ -142,10 +173,10 @@ fun HomeScreen(
             Text(tr("নতুন প্রজেক্ট", "New Project"), fontSize = 16.sp)
         }
         Spacer(Modifier.height(20.dp))
-        Text(tr("সাম্প্রতিক প্রজেক্ট", "Recent projects"), color = Color.Gray, fontSize = 13.sp)
+        Text(tr("সাম্প্রতিক প্রজেক্ট", "Recent projects"), color = TextLo, fontSize = 13.sp)
         Spacer(Modifier.height(8.dp))
         if (projects.isEmpty()) {
-            Text(tr("এখনও কোনো প্রজেক্ট নেই", "No projects yet"), color = Color.Gray)
+            Text(tr("এখনও কোনো প্রজেক্ট নেই", "No projects yet"), color = TextLo)
         }
         LazyColumn {
             items(projects, key = { it.id }) { p ->
@@ -153,12 +184,12 @@ fun HomeScreen(
                     Modifier
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
-                        .background(Color(0xFF1A1A1A), RoundedCornerShape(12.dp))
+                        .background(Panel2, RoundedCornerShape(12.dp))
                         .clickable { onOpen(p) }
                         .padding(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val first = p.video.firstOrNull()
+                    val first = p.seqs.firstOrNull()?.video?.firstOrNull()
                     if (first != null) {
                         Thumb(
                             first.uri,
@@ -173,7 +204,7 @@ fun HomeScreen(
                                 .background(Color(0xFF2A2A2A), RoundedCornerShape(6.dp)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Filled.Movie, contentDescription = null, tint = Color.Gray)
+                            Icon(Icons.Filled.Movie, contentDescription = null, tint = TextLo)
                         }
                     }
                     Spacer(Modifier.width(12.dp))
@@ -181,12 +212,12 @@ fun HomeScreen(
                         Text(p.name, fontSize = 15.sp, maxLines = 1)
                         Text(
                             dateFmt.format(Date(p.modified)) + " · " + fmt(p.totalMs),
-                            color = Color.Gray,
+                            color = TextLo,
                             fontSize = 12.sp
                         )
                     }
                     IconButton(onClick = { toDelete = p }) {
-                        Icon(Icons.Filled.Delete, contentDescription = tr("ডিলিট", "Delete"), tint = Color.Gray)
+                        Icon(Icons.Filled.Delete, contentDescription = tr("ডিলিট", "Delete"), tint = TextLo)
                     }
                 }
             }
@@ -244,25 +275,53 @@ fun HomeScreen(
             onDismissRequest = { showSettings = false },
             title = { Text(tr("সেটিংস", "Settings")) },
             text = {
-                Column {
-                    Text(tr("ভাষা", "Language"), color = Color.Gray, fontSize = 12.sp)
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(tr("ভাষা", "Language"), color = TextLo, fontSize = 12.sp)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         RadioButton(selected = lang == "bn", onClick = { onLang("bn") })
                         Text("বাংলা")
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Spacer(Modifier.width(16.dp))
                         RadioButton(selected = lang == "en", onClick = { onLang("en") })
                         Text("English")
                     }
-                    Spacer(Modifier.height(12.dp))
-                    Text(tr("এই ফোন", "This phone"), color = Color.Gray, fontSize = 12.sp)
+                    Spacer(Modifier.height(10.dp))
+                    Text(tr("থিমের রং", "Accent color"), color = TextLo, fontSize = 12.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Accents.forEachIndexed { i, col ->
+                            Box(
+                                Modifier
+                                    .size(32.dp)
+                                    .background(col, CircleShape)
+                                    .border(if (accent == i) 3.dp else 0.dp, Color.White, CircleShape)
+                                    .clickable { onAccent(i) }
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(tr("ডিফল্ট প্রিভিউ কোয়ালিটি", "Default preview quality"), color = TextLo, fontSize = 12.sp)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("Auto", "Full", "1/2", "1/4", "1/8").forEachIndexed { i, l ->
+                            FilterChip(selected = qualityPref == i, onClick = { onQuality(i) }, label = { Text(l, fontSize = 12.sp) })
+                        }
+                    }
+                    Text(
+                        tr("Auto এই ফোনে: ", "Auto on this phone: ") + recommended(device).label,
+                        fontSize = 11.sp,
+                        color = TextLo
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(tr("টাইমলাইনের উচ্চতা", "Timeline height"), color = TextLo, fontSize = 12.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf(tr("ছোট", "Compact"), tr("মাঝারি", "Normal"), tr("বড়", "Large")).forEachIndexed { i, l ->
+                            FilterChip(selected = tlPref == i, onClick = { onTimeline(i) }, label = { Text(l, fontSize = 12.sp) })
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(tr("এই ফোন", "This phone"), color = TextLo, fontSize = 12.sp)
                     Text(
                         "RAM: " + String.format(Locale.US, "%.1f", device.ramGb) + " GB · CPU: " +
                                 device.cores + " cores · Android API " + device.sdk,
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        tr("প্রিভিউ কোয়ালিটি (অটো): ", "Auto preview quality: ") + recommended(device).label,
                         fontSize = 12.sp
                     )
                 }

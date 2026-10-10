@@ -39,6 +39,25 @@ class Prefs(context: Context) {
         set(v) {
             sp.edit().putString("lang", v).apply()
         }
+    var accent: Int
+        get() = sp.getInt("accent", 0)
+        set(v) {
+            sp.edit().putInt("accent", v).apply()
+        }
+
+    /** 0 = auto, 1 = Full, 2 = 1/2, 3 = 1/4, 4 = 1/8 */
+    var quality: Int
+        get() = sp.getInt("quality", 1)
+        set(v) {
+            sp.edit().putInt("quality", v).apply()
+        }
+
+    /** 0 = compact, 1 = normal, 2 = large */
+    var timeline: Int
+        get() = sp.getInt("timeline", 1)
+        set(v) {
+            sp.edit().putInt("timeline", v).apply()
+        }
 }
 
 class ProjectStore(context: Context) {
@@ -57,7 +76,8 @@ class ProjectStore(context: Context) {
         val files = dir.listFiles() ?: return emptyList()
         return files.mapNotNull { f ->
             try {
-                json.decodeFromString<Project>(f.readText())
+                val p = json.decodeFromString<Project>(f.readText())
+                if (p.seqs.isEmpty()) p.copy(seqs = listOf(Seq())) else p
             } catch (e: Exception) {
                 null
             }
@@ -84,6 +104,14 @@ fun deviceInfo(context: Context): Device {
 
 enum class Quality(val label: String, val div: Int) {
     FULL("Full", 1), HALF("1/2", 2), QUARTER("1/4", 4), EIGHTH("1/8", 8)
+}
+
+fun qualityFromPref(i: Int, d: Device): Quality = when (i) {
+    0 -> recommended(d)
+    1 -> Quality.FULL
+    2 -> Quality.HALF
+    3 -> Quality.QUARTER
+    else -> Quality.EIGHTH
 }
 
 fun recommended(d: Device): Quality = when {

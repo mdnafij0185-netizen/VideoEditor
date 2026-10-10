@@ -394,7 +394,7 @@ fun PreviewArea(c: EditorController, sourceMode: Boolean, modifier: Modifier) {
                         DropdownMenuItem(
                             text = { Text(q.label) },
                             onClick = {
-                                c.setQuality(q)
+                               c.changeQuality(q)
                                 qMenu = false
                             }
                         )

@@ -241,6 +241,21 @@ class EditorController(
                 globalMs = (startOf(clips, idx) + within).coerceAtMost(seq.totalMs)
             }
         }
+        val vc = seq.video
+        if (vc.isNotEmpty() && player.mediaItemCount == vc.size) {
+            val vi = player.currentMediaItemIndex.coerceIn(0, vc.size - 1)
+            val g = gainOf(vc[vi].fx).coerceAtMost(1f)
+            if (player.volume != g) player.volume = g
+        }
+        for (k in 0..1) {
+            val ac = seq.audio.getOrNull(k) ?: continue
+            val ap = audioPlayers[k]
+            if (ac.isNotEmpty() && ap.mediaItemCount == ac.size) {
+                val ai = ap.currentMediaItemIndex.coerceIn(0, ac.size - 1)
+                val g = gainOf(ac[ai].fx).coerceAtMost(1f)
+                if (ap.volume != g) ap.volume = g
+            }
+        }
         if (sourceMedia != null) {
             srcPos = sourcePlayer.currentPosition
             if (srcPlaying && srcPos >= srcOut) sourcePlayer.pause()
@@ -465,21 +480,38 @@ class EditorController(
 
     // ---------- effects ----------
     private fun liveFx(f: (Fx) -> Fx) {
-        val id = selectedVideoClip()?.id ?: return
-        liveSeq { s -> s.copy(video = s.video.map { if (it.id == id) it.copy(fx = f(it.fx)) else it }) }
+        val id = selectedClipId ?: return
+        liveSeq { sq -> mapClips(sq) { if (it.id == id) listOf(it.copy(fx = f(it.fx))) else listOf(it) } }
     }
 
     private fun editFx(f: (Fx) -> Fx) {
-        val id = selectedVideoClip()?.id ?: return
-        editSeq { s -> s.copy(video = s.video.map { if (it.id == id) it.copy(fx = f(it.fx)) else it }) }
+        val id = selectedClipId ?: return
+        editSeq { sq -> mapClips(sq) { if (it.id == id) listOf(it.copy(fx = f(it.fx))) else listOf(it) } }
     }
 
     fun addEffect(e: Eff) {
-        if (selectedVideoClip() == null) {
-            toast = Msg(
-                "আগে টাইমলাইনে একটা ভিডিও ক্লিপ সিলেক্ট করুন",
-                "Select a video clip on the timeline first"
-            )
+        val tx = selectedText()
+        if (tx != null) {
+            if (e == Eff.BW) {
+                updateText(tx.id, false) { it.copy(bw = true) }
+                toast = Msg("টেক্সটে সাদা-কালো যোগ হয়েছে", "Black & White added to text")
+            } else {
+                toast = Msg(
+                    "টেক্সটের Size/Position/Opacity টেক্সট প্যানেলে আছে",
+                    "Text Size/Position/Opacity are in the Text panel"
+                )
+            }
+            return
+        }
+        val sel = selectedAnyClip()
+        if (sel == null) {
+            toast = Msg("আগে টাইমলাইনে একটা ক্লিপ সিলেক্ট করুন", "Select a clip on the timeline first")
+            return
+        }
+        val audioEffect = e == Eff.DENOISE || e == Eff.VOLUME || e == Eff.EQ
+        val isVideo = seq.video.any { it.id == sel.id }
+        if (!audioEffect && !isVideo) {
+            toast = Msg("এই ইফেক্ট শুধু ভিডিও ক্লিপে", "This effect needs a video clip")
             return
         }
         editFx { fx ->
@@ -492,12 +524,19 @@ class EditorController(
                 Eff.BW -> fx.copy(bwOn = true)
                 Eff.COLOR -> fx.copy(colorOn = true)
                 Eff.DENOISE -> fx.copy(denoiseOn = true)
+                Eff.VOLUME -> fx.copy(volOn = true)
+                Eff.EQ -> fx.copy(eqOn = true)
             }
         }
         toast = Msg("ইফেক্ট যোগ হয়েছে, Controls প্যানেলে দেখুন", "Effect added. See the Controls panel")
     }
 
     fun removeEffect(e: Eff) {
+        val tx = selectedText()
+        if (tx != null) {
+            if (e == Eff.BW) updateText(tx.id, false) { it.copy(bw = false) }
+            return
+        }
         editFx { fx ->
             when (e) {
                 Eff.TRANSFORM -> fx.copy(transformOn = false, scale = Param(100f), posX = Param(0f), posY = Param(0f))
@@ -506,15 +545,30 @@ class EditorController(
                 Eff.BLUR -> fx.copy(blurOn = false, blur = Param(10f))
                 Eff.CROP -> fx.copy(cropOn = false, cropL = 0f, cropR = 0f, cropT = 0f, cropB = 0f)
                 Eff.BW -> fx.copy(bwOn = false)
-                Eff.COLOR -> fx.copy(colorOn = false, bright = 0f, contrast = 0f, sat = 0f)
+                Eff.COLOR -> fx.copy(colorOn = false, bright = 0f, contrast = 0f, sat = 0f, exposure = 0f, temp = 0f, tint = 0f)
                 Eff.DENOISE -> fx.copy(denoiseOn = false)
+                Eff.VOLUME -> fx.copy(volOn = false, volDb = 0f)
+                Eff.EQ -> fx.copy(eqOn = false, eqGain = 0f)
             }
         }
+    }
+
+    fun muteClipAudio(id: String) {
+        editSeq { sq ->
+            mapClips(sq) {
+                if (it.id == id) listOf(it.copy(fx = it.fx.copy(volOn = true, volDb = -80f))) else listOf(it)
+            }
+        }
+        toast = Msg("অডিও বন্ধ হয়েছে (Controls-এ Volume বাড়ালে ফিরবে)", "Audio muted (raise Volume in Controls to undo)")
     }
 
     fun setParam(w: P, v: Float, t: Long) = liveFx { it.mapParam(w) { p -> p.withValueAt(t, v) } }
     fun toggleKeyframe(w: P, t: Long) = editFx { it.mapParam(w) { p -> p.toggleKeyframeAt(t) } }
     fun setDenoise(v: Float) = liveFx { it.copy(denoise = v) }
+    fun setVolume(v: Float) = liveFx { it.copy(volDb = v) }
+    fun setEq(freq: Float? = null, gain: Float? = null, q: Float? = null) = liveFx {
+        it.copy(eqFreq = freq ?: it.eqFreq, eqGain = gain ?: it.eqGain, eqQ = q ?: it.eqQ)
+    }
     fun setCrop(l: Float? = null, r: Float? = null, t: Float? = null, b: Float? = null) = liveFx {
         it.copy(
             cropL = l ?: it.cropL, cropR = r ?: it.cropR,
@@ -522,11 +576,21 @@ class EditorController(
         )
     }
 
-    fun setColor(bright: Float? = null, contrast: Float? = null, sat: Float? = null) = liveFx {
+    fun setColor(
+        bright: Float? = null,
+        contrast: Float? = null,
+        sat: Float? = null,
+        exposure: Float? = null,
+        temp: Float? = null,
+        tint: Float? = null
+    ) = liveFx {
         it.copy(
             bright = bright ?: it.bright,
             contrast = contrast ?: it.contrast,
-            sat = sat ?: it.sat
+            sat = sat ?: it.sat,
+            exposure = exposure ?: it.exposure,
+            temp = temp ?: it.temp,
+            tint = tint ?: it.tint
         )
     }
 
@@ -534,13 +598,15 @@ class EditorController(
     fun previewGesture(zoomBy: Float, panXPct: Float, panYPct: Float) {
         val tc = selectedText()
         if (tc != null) {
+            val lt = (globalMs - tc.startMs).coerceIn(0L, tc.durMs)
             updateText(tc.id, true) {
                 it.copy(
-                    posX = (it.posX + panXPct * 2f).coerceIn(-100f, 100f),
-                    posY = (it.posY + panYPct * 2f).coerceIn(-100f, 100f),
-                    sizePct = (it.sizePct * zoomBy).coerceIn(2f, 30f)
+                    xP = it.xP.withValueAt(lt, (it.xP.at(lt) + panXPct * 2f).coerceIn(-100f, 100f)),
+                    yP = it.yP.withValueAt(lt, (it.yP.at(lt) + panYPct * 2f).coerceIn(-100f, 100f)),
+                    sP = it.sP.withValueAt(lt, (it.sP.at(lt) * zoomBy).coerceIn(2f, 30f))
                 )
             }
+            liveDeadline = SystemClock.uptimeMillis() + 600L
             return
         }
         val cl = selectedVideoClip() ?: return
@@ -579,9 +645,28 @@ class EditorController(
         selectText(copy.id)
     }
 
+    fun textLocalTime(t: TextClip): Long = (globalMs - t.startMs).coerceIn(0L, t.durMs)
+
+    fun setTextParam(id: String, w: TP, v: Float, lt: Long) =
+        updateText(id, true) { it.mapParam(w) { p -> p.withValueAt(lt, v) } }
+
+    fun toggleTextKeyframe(id: String, w: TP, lt: Long) =
+        updateText(id, false) { it.mapParam(w) { p -> p.toggleKeyframeAt(lt) } }
+
+    // ---------- transitions ----------
+    fun setTransition(clipId: String, kind: String) {
+        editSeq { sq ->
+            mapClips(sq) { if (it.id == clipId) listOf(it.copy(trans = kind, transMs = 1000L)) else listOf(it) }
+        }
+    }
+
     // ---------- sequences ----------
-    fun addSequence(ratio: String) {
-        val s = Seq(name = "Sequence ${project.seqs.size + 1}", ratio = ratio)
+    fun addSequence(name: String, ratio: String, fps: Int) {
+        val s = Seq(
+            name = name.ifBlank { "Sequence ${project.seqs.size + 1}" },
+            ratio = ratio,
+            fps = fps.coerceIn(1, 120)
+        )
         edit { it.copy(seqs = it.seqs + s) }
         switchSeq(project.seqs.size - 1)
     }

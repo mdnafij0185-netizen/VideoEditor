@@ -77,6 +77,8 @@ fun App() {
     var accent by remember { mutableStateOf(prefs.accent) }
     var qualityPref by remember { mutableStateOf(prefs.quality) }
     var tlPref by remember { mutableStateOf(prefs.timeline) }
+    var panelPref by remember { mutableStateOf(prefs.panelSize) }
+    var panelFirst by remember { mutableStateOf(prefs.panelFirst) }
     var open by remember { mutableStateOf<Project?>(null) }
 
     MaterialTheme(colorScheme = rvedtColors(Accents[accent.coerceIn(0, Accents.size - 1)])) {
@@ -91,6 +93,8 @@ fun App() {
                         accent = accent,
                         qualityPref = qualityPref,
                         tlPref = tlPref,
+                        panelPref = panelPref,
+                        panelFirst = panelFirst,
                         onLang = {
                             lang = it
                             prefs.lang = it
@@ -107,16 +111,29 @@ fun App() {
                             tlPref = it
                             prefs.timeline = it
                         },
+                        onPanelSize = {
+                            panelPref = it
+                            prefs.panelSize = it
+                        },
+                        onPanelFirst = {
+                            panelFirst = it
+                            prefs.panelFirst = it
+                        },
                         onOpen = { open = it }
                     )
                 } else {
                     key(p.id) {
                         val tlH: Dp = when (tlPref) {
-                            0 -> 168.dp
-                            2 -> 230.dp
+                            0 -> 200.dp
+                            2 -> 270.dp
+                            else -> 230.dp
+                        }
+                        val panelH: Dp = when (panelPref) {
+                            0 -> 150.dp
+                            2 -> 250.dp
                             else -> 190.dp
                         }
-                        EditorScreen(p, store, qualityFromPref(qualityPref, device), tlH, onBack = { open = null })
+                        EditorScreen(p, store, qualityFromPref(qualityPref, device), tlH, panelH, panelFirst, onBack = { open = null })
                     }
                 }
             }
@@ -132,10 +149,14 @@ fun HomeScreen(
     accent: Int,
     qualityPref: Int,
     tlPref: Int,
+    panelPref: Int,
+    panelFirst: Boolean,
     onLang: (String) -> Unit,
     onAccent: (Int) -> Unit,
     onQuality: (Int) -> Unit,
     onTimeline: (Int) -> Unit,
+    onPanelSize: (Int) -> Unit,
+    onPanelFirst: (Boolean) -> Unit,
     onOpen: (Project) -> Unit
 ) {
     var projects by remember { mutableStateOf(store.list()) }
@@ -155,7 +176,7 @@ fun HomeScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("RVEDT", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text("PR Edit", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             IconButton(onClick = { showSettings = true }) {
                 Icon(Icons.Filled.Settings, contentDescription = tr("সেটিংস", "Settings"))
             }
@@ -316,6 +337,19 @@ fun HomeScreen(
                         listOf(tr("ছোট", "Compact"), tr("মাঝারি", "Normal"), tr("বড়", "Large")).forEachIndexed { i, l ->
                             FilterChip(selected = tlPref == i, onClick = { onTimeline(i) }, label = { Text(l, fontSize = 12.sp) })
                         }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(tr("ওয়ার্কস্পেস: এডিটিং প্যানেলের উচ্চতা", "Workspace: editing panel height"), color = TextLo, fontSize = 12.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf(tr("ছোট", "Small"), tr("মাঝারি", "Normal"), tr("বড়", "Large")).forEachIndexed { i, l ->
+                            FilterChip(selected = panelPref == i, onClick = { onPanelSize(i) }, label = { Text(l, fontSize = 12.sp) })
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(tr("ওয়ার্কস্পেস: প্যানেলের জায়গা", "Workspace: panel position"), color = TextLo, fontSize = 12.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        FilterChip(selected = !panelFirst, onClick = { onPanelFirst(false) }, label = { Text(tr("টাইমলাইনের নিচে", "Below timeline"), fontSize = 12.sp) })
+                        FilterChip(selected = panelFirst, onClick = { onPanelFirst(true) }, label = { Text(tr("টাইমলাইনের উপরে", "Above timeline"), fontSize = 12.sp) })
                     }
                     Spacer(Modifier.height(10.dp))
                     Text(tr("এই ফোন", "This phone"), color = TextLo, fontSize = 12.sp)

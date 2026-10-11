@@ -5,6 +5,7 @@ package com.example.videoeditor
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RenderEffect
 import android.graphics.Shader
 import android.os.Build
@@ -18,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -36,6 +38,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Switch
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -134,6 +139,8 @@ fun EditorScreen(
     store: ProjectStore,
     startQuality: Quality,
     tlHeight: Dp,
+    panelHeight: Dp,
+    panelFirst: Boolean,
     onBack: () -> Unit
 ) {
     val ctx = LocalContext.current
@@ -146,6 +153,9 @@ fun EditorScreen(
     var trimId by remember { mutableStateOf<String?>(null) }
     var speedId by remember { mutableStateOf<String?>(null) }
     var showRename by remember { mutableStateOf(false) }
+    var showNewSeq by remember { mutableStateOf(false) }
+    var panelDp by remember { mutableStateOf(panelHeight.value) }
+    val dens = LocalDensity.current.density
 
     DisposableEffect(Unit) {
         onDispose {
@@ -223,52 +233,85 @@ fun EditorScreen(
                 }
             }
 
-            SeqStrip(c, tab, onTab = { tab = it }, onRename = { showRename = true })
+            SeqStrip(c, tab, onTab = { tab = it }, onRename = { showRename = true }, onNew = { showNewSeq = true })
             PreviewArea(c, tab == Tab.SOURCE, Modifier.weight(1f))
             TransportRow(c, tab == Tab.SOURCE)
 
-            if (tab == Tab.SOURCE) {
-                SourceControls(c)
-            } else {
-                TimelineView(c, tlHeight, onSpeed = { speedId = it }, onTrim = { trimId = it })
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceAround
-                ) {
-                    ToolButton(Icons.Filled.Crop, tr("ট্রিম", "Trim")) {
-                        val id = c.selectedClipId
-                        if (id == null) c.toast = Msg("আগে একটা ক্লিপ সিলেক্ট করুন", "Select a clip first") else trimId = id
+            val timelineBlock: @Composable () -> Unit = {
+                if (tab == Tab.SOURCE) {
+                    SourceControls(c)
+                } else {
+                    TimelineView(c, tlHeight, onSpeed = { speedId = it }, onTrim = { trimId = it })
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceAround
+                    ) {
+                        ToolButton(Icons.Filled.Crop, tr("ট্রিম", "Trim")) {
+                            val id = c.selectedClipId
+                            if (id == null) c.toast = Msg("আগে একটা ক্লিপ সিলেক্ট করুন", "Select a clip first") else trimId = id
+                        }
+                        ToolButton(Icons.Filled.VerticalSplit, tr("স্প্লিট", "Split")) { c.splitAtPlayhead() }
+                        ToolButton(Icons.Filled.ContentCopy, tr("ডুপ্লিকেট", "Duplicate")) { c.duplicateSelected() }
+                        ToolButton(Icons.Filled.Delete, tr("ডিলিট", "Delete")) { c.deleteSelected() }
                     }
-                    ToolButton(Icons.Filled.VerticalSplit, tr("স্প্লিট", "Split")) { c.splitAtPlayhead() }
-                    ToolButton(Icons.Filled.ContentCopy, tr("ডুপ্লিকেট", "Duplicate")) { c.duplicateSelected() }
-                    ToolButton(Icons.Filled.Delete, tr("ডিলিট", "Delete")) { c.deleteSelected() }
                 }
             }
-
-            if (panelOpen) {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(190.dp)
-                        .background(Panel)
-                ) {
-                    when (panel) {
-                        PanelTab.PROJECT -> ProjectPanel(
-                            c,
-                            onImport = { types -> picker.launch(types) },
-                            onOpenSource = {
-                                c.openSource(it)
-                                tab = Tab.SOURCE
-                            }
+            val panelBlock: @Composable () -> Unit = {
+                if (panelOpen) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(18.dp)
+                            .background(Color(0xFF101216))
+                            .pointerInput(panelFirst) {
+                                detectVerticalDragGestures { change, dy ->
+                                    change.consume()
+                                    val d = dy / dens
+                                    panelDp = (if (panelFirst) panelDp + d else panelDp - d).coerceIn(110f, 420f)
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            Modifier
+                                .width(44.dp)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(TextLo)
                         )
-                        PanelTab.EFFECTS -> EffectsPanel(c)
-                        PanelTab.CONTROLS -> ControlsPanel(c)
-                        PanelTab.TEXT -> TextPanel(c)
-                        PanelTab.EXPORT -> ExportPanel(c)
+                    }
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(panelDp.dp)
+                            .background(Panel)
+                    ) {
+                        when (panel) {
+                            PanelTab.PROJECT -> ProjectPanel(
+                                c,
+                                onImport = { types -> picker.launch(types) },
+                                onNewSeq = { showNewSeq = true },
+                                onOpenSource = {
+                                    c.openSource(it)
+                                    tab = Tab.SOURCE
+                                }
+                            )
+                            PanelTab.EFFECTS -> EffectsPanel(c)
+                            PanelTab.CONTROLS -> ControlsPanel(c)
+                            PanelTab.TEXT -> TextPanel(c)
+                            PanelTab.EXPORT -> ExportPanel(c)
+                        }
                     }
                 }
+            }
+            if (panelFirst) {
+                panelBlock()
+                timelineBlock()
+            } else {
+                timelineBlock()
+                panelBlock()
             }
 
             Row(
@@ -313,6 +356,17 @@ fun EditorScreen(
         }
     }
 
+    if (showNewSeq) {
+        NewSequenceDialog(
+            defaultName = "Sequence " + (c.project.seqs.size + 1),
+            onDismiss = { showNewSeq = false },
+            onCreate = { n, r, f ->
+                c.addSequence(n, r, f)
+                tab = Tab.SEQ
+                showNewSeq = false
+            }
+        )
+    }
     val tid = trimId
     val trimClip = if (tid != null) c.findClip(tid) else null
     if (trimClip != null) {
@@ -393,8 +447,7 @@ fun ToolButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: Str
 }
 
 @Composable
-fun SeqStrip(c: EditorController, tab: Tab, onTab: (Tab) -> Unit, onRename: () -> Unit) {
-    var plus by remember { mutableStateOf(false) }
+fun SeqStrip(c: EditorController, tab: Tab, onTab: (Tab) -> Unit, onRename: () -> Unit, onNew: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -419,34 +472,33 @@ fun SeqStrip(c: EditorController, tab: Tab, onTab: (Tab) -> Unit, onRename: () -
                         onTab(Tab.SEQ)
                     }
                 },
-                label = { Text(s.name + " · " + s.ratio) }
+                label = { Text(s.name + " · " + s.ratio + " · " + s.fps + "fps") }
             )
         }
-        Box {
-            IconButton(onClick = { plus = true }, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-            }
-            DropdownMenu(expanded = plus, onDismissRequest = { plus = false }) {
-                listOf("9:16", "16:9", "4:3").forEach { r ->
-                    DropdownMenuItem(
-                        text = { Text(tr("নতুন সিকোয়েন্স ", "New sequence ") + r) },
-                        onClick = {
-                            plus = false
-                            c.addSequence(r)
-                            onTab(Tab.SEQ)
-                        }
-                    )
-                }
-            }
+        IconButton(onClick = onNew, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Filled.Add, contentDescription = null)
         }
     }
 }
 
 private fun colorMatrixFor(fx: Fx): ColorMatrix? {
-    val adj = fx.colorOn && (fx.bright != 0f || fx.contrast != 0f || fx.sat != 0f)
+    val adj = fx.colorOn && (fx.bright != 0f || fx.contrast != 0f || fx.sat != 0f || fx.hasRgbGains())
     if (!fx.bwOn && !adj) return null
     val m = ColorMatrix()
     if (adj) {
+        if (fx.hasRgbGains()) {
+            val g = fx.rgbGains()
+            m.postConcat(
+                ColorMatrix(
+                    floatArrayOf(
+                        g[0], 0f, 0f, 0f, 0f,
+                        0f, g[1], 0f, 0f, 0f,
+                        0f, 0f, g[2], 0f, 0f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+            )
+        }
         val s = ColorMatrix()
         s.setSaturation((1f + fx.sat / 100f).coerceAtLeast(0f))
         m.postConcat(s)
@@ -482,18 +534,21 @@ fun PreviewArea(c: EditorController, sourceMode: Boolean, modifier: Modifier) {
     var blurV = 0f
     var cmV: ColorMatrix? = null
     var keyV = "-"
+    var cropV: FloatArray? = null
     if (!sourceMode && clips.isNotEmpty()) {
         val (i, off) = locate(clips, c.globalMs.coerceIn(0L, (seq.totalMs - 1).coerceAtLeast(0L)))
         val fx = clips[i].fx
         geoV = fx.geometry(off)
         if (fx.blurOn) blurV = fx.blur.at(off)
         cmV = colorMatrixFor(fx)
-        keyV = "${fx.bwOn}|${fx.colorOn}|${fx.bright}|${fx.contrast}|${fx.sat}|${(blurV * 2).toInt()}"
+        if (fx.cropOn) cropV = floatArrayOf(fx.cropL, fx.cropR, fx.cropT, fx.cropB)
+        keyV = "${fx.bwOn}|${fx.colorOn}|${fx.bright}|${fx.contrast}|${fx.sat}|${fx.exposure}|${fx.temp}|${fx.tint}|${(blurV * 2).toInt()}"
     }
     val geo = geoV
     val blur = blurV
     val cm = cmV
     val key = keyV
+    val crop = cropV
     val hasContent = if (sourceMode) c.sourceMedia != null else clips.isNotEmpty()
     val audioOnly = sourceMode && c.sourceMedia?.isAudio == true
     val activePlayer = if (sourceMode) c.sourcePlayer else c.player
@@ -536,6 +591,16 @@ fun PreviewArea(c: EditorController, sourceMode: Boolean, modifier: Modifier) {
                         v.scaleY = geo.sy
                         v.translationX = geo.tx / 2f * v.width
                         v.translationY = -geo.ty / 2f * v.height
+                        if (crop != null) {
+                            v.clipBounds = Rect(
+                                (crop[0] / 100f * v.width).toInt(),
+                                (crop[2] / 100f * v.height).toInt(),
+                                (v.width - crop[1] / 100f * v.width).toInt(),
+                                (v.height - crop[3] / 100f * v.height).toInt()
+                            )
+                        } else {
+                            v.clipBounds = null
+                        }
                         if (v.tag != key) {
                             v.tag = key
                             val tv = v.videoSurfaceView as? TextureView
@@ -578,25 +643,50 @@ fun PreviewArea(c: EditorController, sourceMode: Boolean, modifier: Modifier) {
                         val inRange = c.globalMs >= t.startMs && c.globalMs < t.startMs + t.durMs
                         val sel = c.selectedTextId == t.id
                         if (inRange || sel) {
+                            val lt = (c.globalMs - t.startMs).coerceIn(0L, t.durMs)
+                            val sz = t.sP.at(lt)
+                            val px = t.xP.at(lt)
+                            val py = t.yP.at(lt)
+                            val op = (t.oP.at(lt) / 100f).coerceIn(0f, 1f)
                             Text(
                                 t.text,
-                                color = Color(t.color),
-                                fontSize = with(density) { (t.sizePct / 100f * hPx).toSp() },
+                                color = Color(t.shownColor()),
+                                fontSize = with(density) { (sz / 100f * hPx).toSp() },
                                 fontFamily = Fonts.family(t.font),
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier
                                     .align(Alignment.Center)
                                     .offset {
                                         IntOffset(
-                                            (t.posX / 100f * wPx / 2f).roundToInt(),
-                                            (t.posY / 100f * hPx / 2f).roundToInt()
+                                            (px / 100f * wPx / 2f).roundToInt(),
+                                            (py / 100f * hPx / 2f).roundToInt()
                                         )
                                     }
-                                    .alpha(if (inRange) 1f else 0.35f)
+                                    .alpha(if (inRange) op else 0.35f)
                                     .then(if (sel) Modifier.border(1.dp, Color.White.copy(alpha = 0.7f)) else Modifier)
                             )
                         }
                     }
+                }
+                var transAlpha = 0f
+                var transWhite = false
+                var tAcc = 0L
+                seq.video.forEachIndexed { i, cl ->
+                    if (i > 0 && cl.trans.isNotEmpty()) {
+                        val a = 1f - abs(c.globalMs - tAcc).toFloat() / (cl.transMs / 2f)
+                        if (a > transAlpha) {
+                            transAlpha = a
+                            transWhite = cl.trans == "white"
+                        }
+                    }
+                    tAcc += cl.durMs
+                }
+                if (transAlpha > 0f) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background((if (transWhite) Color.White else Color.Black).copy(alpha = transAlpha.coerceIn(0f, 1f)))
+                    )
                 }
                 Box(Modifier.align(Alignment.BottomEnd)) {
                     Text(
@@ -799,7 +889,12 @@ fun SpeedDialog(clip: Clip, onDismiss: () -> Unit, onApply: (Float) -> Unit) {
 }
 
 @Composable
-fun ProjectPanel(c: EditorController, onImport: (Array<String>) -> Unit, onOpenSource: (MediaRef) -> Unit) {
+fun ProjectPanel(
+    c: EditorController,
+    onImport: (Array<String>) -> Unit,
+    onNewSeq: () -> Unit,
+    onOpenSource: (MediaRef) -> Unit
+) {
     var menu by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         Text(
@@ -855,15 +950,13 @@ fun ProjectPanel(c: EditorController, onImport: (Array<String>) -> Unit, onOpenS
                         onImport(arrayOf("audio/*"))
                     }
                 )
-                listOf("9:16", "16:9", "4:3").forEach { r ->
-                    DropdownMenuItem(
-                        text = { Text(tr("সিকোয়েন্স তৈরি ", "Create Sequence ") + r) },
-                        onClick = {
-                            menu = false
-                            c.addSequence(r)
-                        }
-                    )
-                }
+                DropdownMenuItem(
+                    text = { Text(tr("নতুন সিকোয়েন্স...", "New Sequence...")) },
+                    onClick = {
+                        menu = false
+                        onNewSeq()
+                    }
+                )
             }
         }
     }
@@ -961,21 +1054,24 @@ fun EffectsPanel(c: EditorController) {
     ) {
         Text(
             tr(
-                "টাইমলাইনে ক্লিপ সিলেক্ট করে ইফেক্টে ডাবল ট্যাপ করুন (অথবা + চাপুন)",
-                "Select a clip, then double tap an effect (or press +)"
+                "টাইমলাইনে ক্লিপ (অথবা টেক্সট) সিলেক্ট করে ইফেক্টে ডাবল ট্যাপ করুন (অথবা + চাপুন)",
+                "Select a clip (or text), then double tap an effect (or press +)"
             ),
             color = TextLo,
             fontSize = 11.sp
         )
-        Spacer(Modifier.height(4.dp))
-        EffectRow(c, "Transform", tr("পজিশন, স্কেল", "Position, scale"), Eff.TRANSFORM)
+        Text("VIDEO", fontSize = 10.sp, color = TextLo, modifier = Modifier.padding(top = 6.dp))
+        EffectRow(c, "Transform", tr("পজিশন, স্কেল (কিফ্রেম সহ)", "Position, scale (keyframes)"), Eff.TRANSFORM)
         EffectRow(c, "Horizontal Flip", tr("ডান-বাম উল্টানো", "Mirror left-right"), Eff.FLIP_H)
         EffectRow(c, "Vertical Flip", tr("উপর-নিচ উল্টানো", "Mirror top-bottom"), Eff.FLIP_V)
-        EffectRow(c, "Gaussian Blur", tr("ঝাপসা করা (এক্সপোর্টে সব ফোনে)", "Blur the picture"), Eff.BLUR)
-        EffectRow(c, "Crop", tr("চারদিক থেকে কেটে জুম", "Cut edges and zoom"), Eff.CROP)
-        EffectRow(c, "Black & White", tr("সাদা-কালো", "Grayscale"), Eff.BW)
-        EffectRow(c, "Brightness & Contrast", tr("উজ্জ্বলতা, কনট্রাস্ট, স্যাচুরেশন", "Brightness, contrast, saturation"), Eff.COLOR)
-        EffectRow(c, "Denoise", tr("অডিওর হিস/গুনগুন কমানো", "Reduce hiss/hum in audio"), Eff.DENOISE)
+        EffectRow(c, "Gaussian Blur", tr("ঝাপসা করা", "Blur the picture"), Eff.BLUR)
+        EffectRow(c, "Crop", tr("চারদিক থেকে কেটে ফেলা (কালো)", "Cut edges away"), Eff.CROP)
+        EffectRow(c, "Black & White", tr("সাদা-কালো (টেক্সটেও চলে)", "Grayscale (works on text too)"), Eff.BW)
+        EffectRow(c, "Lumetri Color", tr("এক্সপোজার, কনট্রাস্ট, তাপমাত্রা, টিন্ট, স্যাচুরেশন", "Exposure, contrast, temperature, tint, saturation"), Eff.COLOR)
+        Text("AUDIO", fontSize = 10.sp, color = TextLo, modifier = Modifier.padding(top = 6.dp))
+        EffectRow(c, "Volume", tr("ভলিউম (dB)", "Volume (dB)"), Eff.VOLUME)
+        EffectRow(c, "Parametric Equalizer", tr("ফ্রিকোয়েন্সি, গেইন, Q (এক্সপোর্টে কাজ করে)", "Frequency, gain, Q (applied on export)"), Eff.EQ)
+        EffectRow(c, "Denoise", tr("হিস/গুনগুন কমানো (এক্সপোর্টে)", "Reduce hiss/hum (on export)"), Eff.DENOISE)
     }
 }
 
@@ -1020,6 +1116,44 @@ fun KeyframeButton(active: Boolean, animated: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
+fun ValueText(value: Float, unit: String, range: ClosedFloatingPointRange<Float>, onSet: (Float) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Text(
+        value.roundToInt().toString() + unit,
+        fontSize = 11.sp,
+        color = MaterialTheme.colorScheme.primary,
+        textAlign = TextAlign.End,
+        modifier = Modifier
+            .width(54.dp)
+            .clickable { open = true }
+    )
+    if (open) {
+        var txt by remember { mutableStateOf(String.format(Locale.US, "%.1f", value)) }
+        AlertDialog(
+            onDismissRequest = { open = false },
+            title = { Text(tr("মান লিখুন", "Type a value")) },
+            text = {
+                OutlinedTextField(
+                    value = txt,
+                    onValueChange = { txt = it },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    label = { Text(String.format(Locale.US, "%.0f ~ %.0f", range.start, range.endInclusive)) }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val v = txt.toFloatOrNull()
+                    if (v != null) onSet(v.coerceIn(range.start, range.endInclusive))
+                    open = false
+                }) { Text(tr("ঠিক আছে", "OK")) }
+            },
+            dismissButton = { TextButton(onClick = { open = false }) { Text(tr("বাতিল", "Cancel")) } }
+        )
+    }
+}
+
+@Composable
 fun ParamRow(
     c: EditorController,
     label: String,
@@ -1039,8 +1173,40 @@ fun ParamRow(
             valueRange = range,
             modifier = Modifier.weight(1f)
         )
-        Text(v.roundToInt().toString() + unit, fontSize = 11.sp, modifier = Modifier.width(46.dp), textAlign = TextAlign.End)
+        ValueText(v, unit, range) {
+            c.setParam(which, it, t)
+            c.endLive()
+        }
         KeyframeButton(param.hasKeyframeAt(t), param.kfs.isNotEmpty()) { c.toggleKeyframe(which, t) }
+    }
+}
+
+@Composable
+fun TextParamRow(
+    c: EditorController,
+    tc: TextClip,
+    label: String,
+    which: TP,
+    range: ClosedFloatingPointRange<Float>,
+    unit: String
+) {
+    val lt = c.textLocalTime(tc)
+    val param = tc.param(which)
+    val v = param.at(lt).coerceIn(range.start, range.endInclusive)
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(34.dp)) {
+        Text(label, fontSize = 12.sp, modifier = Modifier.width(80.dp))
+        Slider(
+            value = v,
+            onValueChange = { c.setTextParam(tc.id, which, it, lt) },
+            onValueChangeFinished = { c.endLive() },
+            valueRange = range,
+            modifier = Modifier.weight(1f)
+        )
+        ValueText(v, unit, range) {
+            c.setTextParam(tc.id, which, it, lt)
+            c.endLive()
+        }
+        KeyframeButton(param.hasKeyframeAt(lt), param.kfs.isNotEmpty()) { c.toggleTextKeyframe(tc.id, which, lt) }
     }
 }
 
@@ -1062,9 +1228,60 @@ fun StaticRow(
             valueRange = range,
             modifier = Modifier.weight(1f)
         )
-        Text(value.roundToInt().toString() + unit, fontSize = 11.sp, modifier = Modifier.width(46.dp), textAlign = TextAlign.End)
+        ValueText(value, unit, range) {
+            onChange(it)
+            c.endLive()
+        }
         Spacer(Modifier.width(32.dp))
     }
+}
+
+@Composable
+fun NewSequenceDialog(defaultName: String, onDismiss: () -> Unit, onCreate: (String, String, Int) -> Unit) {
+    var name by remember { mutableStateOf(defaultName) }
+    var ratio by remember { mutableStateOf("16:9") }
+    var fps by remember { mutableStateOf("30") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr("নতুন সিকোয়েন্স", "New Sequence")) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text(tr("নাম", "Name")) }
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(tr("অ্যাসপেক্ট রেশিও", "Aspect ratio"), fontSize = 12.sp, color = TextLo)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf("9:16", "16:9", "4:3").forEach { r ->
+                        FilterChip(selected = ratio == r, onClick = { ratio = r }, label = { Text(r) })
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(tr("ফ্রেম রেট (FPS)", "Frame rate (FPS)"), fontSize = 12.sp, color = TextLo)
+                OutlinedTextField(
+                    value = fps,
+                    onValueChange = { fps = it.filter { ch -> ch.isDigit() }.take(3) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf(24, 25, 30, 50, 60).forEach { f ->
+                        FilterChip(selected = fps == f.toString(), onClick = { fps = f.toString() }, label = { Text(f.toString()) })
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onCreate(name, ratio, fps.toIntOrNull() ?: 30) }) { Text(tr("তৈরি করুন", "Create")) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(tr("বাতিল", "Cancel")) } }
+    )
 }
 
 @Composable
@@ -1079,16 +1296,28 @@ fun SectionHeader(title: String, onRemove: () -> Unit) {
 
 @Composable
 fun ControlsPanel(c: EditorController) {
-    val clip = c.selectedVideoClip()
-    if (clip == null) {
+    val tx = c.selectedText()
+    val clip = c.selectedAnyClip()
+    if (tx != null) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 4.dp)
+        ) {
+            Text(tx.text, fontSize = 11.sp, color = TextLo, maxLines = 1)
+            TextEffectRows(c, tx)
+        }
+    } else if (clip == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
-                tr("টাইমলাইনে একটা ভিডিও ক্লিপ সিলেক্ট করুন", "Select a video clip on the timeline"),
+                tr("টাইমলাইনে একটা ক্লিপ বা টেক্সট সিলেক্ট করুন", "Select a clip or text on the timeline"),
                 color = TextLo,
                 fontSize = 13.sp
             )
         }
     } else {
+        val isVideo = c.seq.video.any { it.id == clip.id }
         val fx = clip.fx
         val t = c.localTime(clip)
         Column(
@@ -1098,7 +1327,9 @@ fun ControlsPanel(c: EditorController) {
                 .padding(horizontal = 10.dp, vertical = 4.dp)
         ) {
             Text(clip.name.substringBeforeLast('.'), fontSize = 11.sp, color = TextLo, maxLines = 1)
-            if (!fx.transformOn && !fx.flipH && !fx.flipV && !fx.blurOn && !fx.cropOn && !fx.bwOn && !fx.colorOn && !fx.denoiseOn) {
+            val any = fx.transformOn || fx.flipH || fx.flipV || fx.blurOn || fx.cropOn || fx.bwOn || fx.colorOn ||
+                    fx.denoiseOn || fx.volOn || fx.eqOn
+            if (!any) {
                 Text(
                     tr(
                         "এই ক্লিপে কোনো ইফেক্ট নেই। ইফেক্ট প্যানেল থেকে যোগ করুন, অথবা প্রিভিউতে আঙুলে জুম/সরান।",
@@ -1108,37 +1339,63 @@ fun ControlsPanel(c: EditorController) {
                     fontSize = 12.sp
                 )
             }
-            if (fx.transformOn) {
+            if (isVideo && fx.transformOn) {
                 SectionHeader("Transform") { c.removeEffect(Eff.TRANSFORM) }
                 ParamRow(c, "Scale", fx.scale, 10f..400f, "%", t, P.SCALE)
                 ParamRow(c, "Position X", fx.posX, -100f..100f, "", t, P.POSX)
                 ParamRow(c, "Position Y", fx.posY, -100f..100f, "", t, P.POSY)
             }
-            if (fx.flipH) SectionHeader("Horizontal Flip") { c.removeEffect(Eff.FLIP_H) }
-            if (fx.flipV) SectionHeader("Vertical Flip") { c.removeEffect(Eff.FLIP_V) }
-            if (fx.blurOn) {
+            if (isVideo && fx.flipH) SectionHeader("Horizontal Flip") { c.removeEffect(Eff.FLIP_H) }
+            if (isVideo && fx.flipV) SectionHeader("Vertical Flip") { c.removeEffect(Eff.FLIP_V) }
+            if (isVideo && fx.blurOn) {
                 SectionHeader("Gaussian Blur") { c.removeEffect(Eff.BLUR) }
                 ParamRow(c, "Blurriness", fx.blur, 0f..60f, "", t, P.BLUR)
             }
-            if (fx.cropOn) {
+            if (isVideo && fx.cropOn) {
                 SectionHeader("Crop") { c.removeEffect(Eff.CROP) }
-                StaticRow(c, "Left", fx.cropL, 0f..45f, "%") { c.setCrop(l = it) }
-                StaticRow(c, "Right", fx.cropR, 0f..45f, "%") { c.setCrop(r = it) }
-                StaticRow(c, "Top", fx.cropT, 0f..45f, "%") { c.setCrop(t = it) }
-                StaticRow(c, "Bottom", fx.cropB, 0f..45f, "%") { c.setCrop(b = it) }
+                StaticRow(c, "Left", fx.cropL, 0f..90f, "%") { c.setCrop(l = it) }
+                StaticRow(c, "Right", fx.cropR, 0f..90f, "%") { c.setCrop(r = it) }
+                StaticRow(c, "Top", fx.cropT, 0f..90f, "%") { c.setCrop(t = it) }
+                StaticRow(c, "Bottom", fx.cropB, 0f..90f, "%") { c.setCrop(b = it) }
             }
-            if (fx.bwOn) SectionHeader("Black & White") { c.removeEffect(Eff.BW) }
-            if (fx.colorOn) {
-                SectionHeader("Brightness & Contrast") { c.removeEffect(Eff.COLOR) }
+            if (isVideo && fx.bwOn) SectionHeader("Black & White") { c.removeEffect(Eff.BW) }
+            if (isVideo && fx.colorOn) {
+                SectionHeader("Lumetri Color") { c.removeEffect(Eff.COLOR) }
+                StaticRow(c, "Exposure", fx.exposure, -100f..100f, "") { c.setColor(exposure = it) }
                 StaticRow(c, "Brightness", fx.bright, -100f..100f, "") { c.setColor(bright = it) }
                 StaticRow(c, "Contrast", fx.contrast, -100f..100f, "") { c.setColor(contrast = it) }
                 StaticRow(c, "Saturation", fx.sat, -100f..100f, "") { c.setColor(sat = it) }
+                StaticRow(c, "Temperature", fx.temp, -100f..100f, "") { c.setColor(temp = it) }
+                StaticRow(c, "Tint", fx.tint, -100f..100f, "") { c.setColor(tint = it) }
+            }
+            if (fx.volOn) {
+                SectionHeader("Volume") { c.removeEffect(Eff.VOLUME) }
+                StaticRow(c, "Level", fx.volDb, -60f..12f, " dB") { c.setVolume(it) }
+            }
+            if (fx.eqOn) {
+                SectionHeader("Parametric Equalizer") { c.removeEffect(Eff.EQ) }
+                StaticRow(c, "Frequency", fx.eqFreq, 20f..12000f, " Hz") { c.setEq(freq = it) }
+                StaticRow(c, "Gain", fx.eqGain, -18f..18f, " dB") { c.setEq(gain = it) }
+                StaticRow(c, "Q", fx.eqQ, 0.1f..10f, "") { c.setEq(q = it) }
             }
             if (fx.denoiseOn) {
                 SectionHeader("Denoise") { c.removeEffect(Eff.DENOISE) }
                 StaticRow(c, "Amount", fx.denoise, 0f..100f, "") { c.setDenoise(it) }
             }
         }
+    }
+}
+
+@Composable
+fun TextEffectRows(c: EditorController, tx: TextClip) {
+    SectionHeader("Text Transform") { }
+    TextParamRow(c, tx, "Size", TP.SIZE, 2f..30f, "")
+    TextParamRow(c, tx, "Position X", TP.X, -100f..100f, "")
+    TextParamRow(c, tx, "Position Y", TP.Y, -100f..100f, "")
+    TextParamRow(c, tx, "Opacity", TP.OPACITY, 0f..100f, "%")
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(40.dp)) {
+        Text("Black & White", fontSize = 12.sp, modifier = Modifier.weight(1f))
+        Switch(checked = tx.bw, onCheckedChange = { v -> c.updateText(tx.id, false) { it.copy(bw = v) } })
     }
 }
 
@@ -1191,9 +1448,7 @@ fun TextPanel(c: EditorController) {
                 c.updateText(t.id, true) { it.copy(color = col.toArgb().toLong() and 0xFFFFFFFFL) }
             }
             Spacer(Modifier.height(8.dp))
-            StaticRow(c, "Size", t.sizePct, 2f..30f, "") { v -> c.updateText(t.id, true) { it.copy(sizePct = v) } }
-            StaticRow(c, "Position X", t.posX, -100f..100f, "") { v -> c.updateText(t.id, true) { it.copy(posX = v) } }
-            StaticRow(c, "Position Y", t.posY, -100f..100f, "") { v -> c.updateText(t.id, true) { it.copy(posY = v) } }
+            TextEffectRows(c, t)
             val maxS = maxOf(60f, c.seq.lengthMs / 1000f + 10f)
             StaticRow(c, "Start", t.startMs / 1000f, 0f..maxS, "s") { v -> c.updateText(t.id, true) { it.copy(startMs = (v * 1000f).toLong()) } }
             StaticRow(c, "Duration", t.durMs / 1000f, 0.5f..30f, "s") { v -> c.updateText(t.id, true) { it.copy(durMs = (v * 1000f).toLong()) } }

@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:label="RVEDT"
+        android:label="PR Edit"
         android:largeHeap="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity

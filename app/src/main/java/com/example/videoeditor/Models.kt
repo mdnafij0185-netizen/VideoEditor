@@ -15,7 +15,8 @@ fun fmt(ms: Long): String {
 data class Msg(val bn: String, val en: String)
 
 enum class P { SCALE, POSX, POSY, BLUR }
-enum class Eff { TRANSFORM, FLIP_H, FLIP_V, BLUR, CROP, BW, COLOR, DENOISE }
+enum class Eff { TRANSFORM, FLIP_H, FLIP_V, BLUR, CROP, BW, COLOR, DENOISE, VOLUME, EQ }
+enum class TP { SIZE, X, Y, OPACITY }
 
 @Serializable
 data class Keyframe(val tMs: Long, val value: Float)
@@ -84,9 +85,26 @@ data class Fx(
     val bright: Float = 0f,
     val contrast: Float = 0f,
     val sat: Float = 0f,
+    val exposure: Float = 0f,
+    val temp: Float = 0f,
+    val tint: Float = 0f,
     val denoiseOn: Boolean = false,
-    val denoise: Float = 50f
+    val denoise: Float = 50f,
+    val volOn: Boolean = false,
+    val volDb: Float = 0f,
+    val eqOn: Boolean = false,
+    val eqFreq: Float = 1000f,
+    val eqGain: Float = 0f,
+    val eqQ: Float = 1f
 )
+
+/** Per-channel gains for Exposure, Temperature and Tint (shared by preview and export). */
+fun Fx.rgbGains(): FloatArray {
+    val ev = Math.pow(2.0, (exposure / 100f * 2f).toDouble()).toFloat()
+    return floatArrayOf(ev * (1f + temp / 300f), ev * (1f - tint / 300f), ev * (1f - temp / 300f))
+}
+
+fun Fx.hasRgbGains(): Boolean = colorOn && (exposure != 0f || temp != 0f || tint != 0f)
 
 fun Fx.param(w: P): Param = when (w) {
     P.SCALE -> scale
@@ -121,22 +139,11 @@ fun Fx.geometry(tMs: Long): Geo {
         tx = posX.at(tMs) / 100f * 2f
         ty = -posY.at(tMs) / 100f * 2f
     }
-    var cs = 1f
-    var cx = 0f
-    var cy = 0f
-    if (cropOn) {
-        val wf = (1f - (cropL + cropR) / 100f).coerceAtLeast(0.1f)
-        val hf = (1f - (cropT + cropB) / 100f).coerceAtLeast(0.1f)
-        cs = maxOf(1f / wf, 1f / hf)
-        cx = -cs * (cropL - cropR) / 100f
-        cy = cs * (cropT - cropB) / 100f
-    }
-    val total = s * cs
     return Geo(
-        sx = if (flipH) -total else total,
-        sy = if (flipV) -total else total,
-        tx = s * cx + tx,
-        ty = s * cy + ty
+        sx = if (flipH) -s else s,
+        sy = if (flipV) -s else s,
+        tx = tx,
+        ty = ty
     )
 }
 
@@ -159,6 +166,8 @@ data class Clip(
     val inMs: Long,
     val outMs: Long,
     val speed: Float = 1f,
+    val trans: String = "",
+    val transMs: Long = 1000L,
     val fx: Fx = Fx()
 ) {
     val durMs: Long get() = ((outMs - inMs) / speed).toLong().coerceAtLeast(1L)
@@ -172,16 +181,43 @@ data class TextClip(
     val durMs: Long = 3000L,
     val font: String = "bebas_neue",
     val color: Long = 0xFFFFFFFFL,
-    val sizePct: Float = 8f,
-    val posX: Float = 0f,
-    val posY: Float = 60f
+    val sP: Param = Param(8f),
+    val xP: Param = Param(0f),
+    val yP: Param = Param(60f),
+    val oP: Param = Param(100f),
+    val bw: Boolean = false
 )
+
+fun TextClip.param(w: TP): Param = when (w) {
+    TP.SIZE -> sP
+    TP.X -> xP
+    TP.Y -> yP
+    TP.OPACITY -> oP
+}
+
+fun TextClip.mapParam(w: TP, f: (Param) -> Param): TextClip = when (w) {
+    TP.SIZE -> copy(sP = f(sP))
+    TP.X -> copy(xP = f(xP))
+    TP.Y -> copy(yP = f(yP))
+    TP.OPACITY -> copy(oP = f(oP))
+}
+
+/** Text colour as shown: grayscale when Black & White is on. */
+fun TextClip.shownColor(): Long {
+    if (!bw) return color
+    val r = ((color shr 16) and 0xFF).toInt()
+    val g = ((color shr 8) and 0xFF).toInt()
+    val b = (color and 0xFF).toInt()
+    val y = (0.299f * r + 0.587f * g + 0.114f * b).toInt().coerceIn(0, 255)
+    return 0xFF000000L or (y.toLong() shl 16) or (y.toLong() shl 8) or y.toLong()
+}
 
 @Serializable
 data class Seq(
     val id: String = newId(),
     val name: String = "Sequence 1",
     val ratio: String = "16:9",
+    val fps: Int = 30,
     val video: List<Clip> = emptyList(),
     val audio: List<List<Clip>> = listOf(emptyList(), emptyList()),
     val texts: List<TextClip> = emptyList()

@@ -52,6 +52,20 @@ class Prefs(context: Context) {
             sp.edit().putInt("quality", v).apply()
         }
 
+    /** 0 = small, 1 = normal, 2 = large editing panel */
+    var panelSize: Int
+        get() = sp.getInt("panelSize", 1)
+        set(v) {
+            sp.edit().putInt("panelSize", v).apply()
+        }
+
+    /** true = panel above the timeline */
+    var panelFirst: Boolean
+        get() = sp.getBoolean("panelFirst", false)
+        set(v) {
+            sp.edit().putBoolean("panelFirst", v).apply()
+        }
+
     /** 0 = compact, 1 = normal, 2 = large */
     var timeline: Int
         get() = sp.getInt("timeline", 1)

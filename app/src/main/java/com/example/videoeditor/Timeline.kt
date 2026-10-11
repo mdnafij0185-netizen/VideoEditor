@@ -2,6 +2,9 @@ package com.example.videoeditor
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -47,11 +52,12 @@ import kotlinx.coroutines.delay
 val TL_RULER = 22.dp
 val TL_TEXT = 28.dp
 val TL_VIDEO = 44.dp
+val TL_VAUDIO = 30.dp
 val TL_AUDIO = 34.dp
 val TL_GUTTER = 54.dp
 
 /** Distance in dp from the top of the timeline to the top of the second audio row. */
-const val TL_AUDIO2_TOP_DP = 128f
+const val TL_AUDIO2_TOP_DP = 158f
 
 @Composable
 private fun GutterLabel(label: String, h: Dp) {
@@ -98,6 +104,7 @@ fun TimelineView(c: EditorController, height: Dp, onSpeed: (String) -> Unit, onT
             Spacer(Modifier.height(TL_RULER))
             GutterLabel("Text", TL_TEXT)
             GutterLabel("Video", TL_VIDEO)
+            GutterLabel("V-Audio", TL_VAUDIO)
             GutterLabel("Audio 1", TL_AUDIO)
             GutterLabel("Audio 2", TL_AUDIO)
         }
@@ -112,6 +119,21 @@ fun TimelineView(c: EditorController, height: Dp, onSpeed: (String) -> Unit, onT
                     c.tlTop = p.y
                     c.tlW = it.size.width.toFloat()
                     c.tlH = it.size.height.toFloat()
+                }
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        do {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.size >= 2) {
+                                val z = event.calculateZoom()
+                                if (z != 1f) {
+                                    c.zoom = (c.zoom * z).coerceIn(12f, 300f)
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    }
                 }
                 .horizontalScroll(scroll)
         ) {
@@ -198,14 +220,91 @@ fun TimelineView(c: EditorController, height: Dp, onSpeed: (String) -> Unit, onT
 
                 // video row
                 var acc = 0L
-                seq.video.forEach { clip ->
+                seq.video.forEachIndexed { vi, clip ->
                     ClipBlock(c, clip, acc, TL_RULER + TL_TEXT, TL_VIDEO, TrackVideo, true, menuFor, { menuFor = it }, onSpeed, onTrim)
+                    // audio that belongs to this video clip, in its own row
+                    Box(
+                        Modifier
+                            .offset(x = (acc / 1000f * zoom).dp, y = TL_RULER + TL_TEXT + TL_VIDEO + 2.dp)
+                            .width((clip.durMs / 1000f * zoom).dp)
+                            .height(TL_VAUDIO - 4.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(TrackAudio.copy(alpha = 0.65f))
+                            .then(if (c.selectedClipId == clip.id) Modifier.border(2.dp, Color.White, RoundedCornerShape(5.dp)) else Modifier)
+                            .pointerInput(clip.id) {
+                                detectTapGestures(
+                                    onTap = { c.selectClip(clip.id) },
+                                    onLongPress = {
+                                        c.selectClip(clip.id)
+                                        menuFor = "a:" + clip.id
+                                    }
+                                )
+                            }
+                    ) {
+                        Text(
+                            "♪ " + clip.name.substringBeforeLast('.'),
+                            fontSize = 9.sp,
+                            maxLines = 1,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                        DropdownMenu(expanded = menuFor == "a:" + clip.id, onDismissRequest = { menuFor = null }) {
+                            DropdownMenuItem(
+                                text = { Text(tr("অডিও বন্ধ (Mute)", "Mute audio")) },
+                                onClick = {
+                                    menuFor = null
+                                    c.muteClipAudio(clip.id)
+                                }
+                            )
+                        }
+                    }
                     acc += clip.durMs
+                    if (vi < seq.video.size - 1) {
+                        val next = seq.video[vi + 1]
+                        val hasT = next.trans.isNotEmpty()
+                        Box(
+                            Modifier
+                                .offset(x = (acc / 1000f * zoom).dp - 9.dp, y = TL_RULER + TL_TEXT + 13.dp)
+                                .size(18.dp)
+                                .clip(CircleShape)
+                                .background(if (hasT) KeyColor else Panel2)
+                                .border(1.dp, if (hasT) KeyColor else TextLo, CircleShape)
+                                .pointerInput(next.id) {
+                                    detectTapGestures(onTap = { menuFor = "t:" + next.id })
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("⇄", fontSize = 10.sp, color = if (hasT) Color.Black else TextLo)
+                            DropdownMenu(expanded = menuFor == "t:" + next.id, onDismissRequest = { menuFor = null }) {
+                                DropdownMenuItem(
+                                    text = { Text(tr("ট্রানজিশন নেই", "No transition")) },
+                                    onClick = {
+                                        menuFor = null
+                                        c.setTransition(next.id, "")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Dip to Black") },
+                                    onClick = {
+                                        menuFor = null
+                                        c.setTransition(next.id, "black")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Dip to White") },
+                                    onClick = {
+                                        menuFor = null
+                                        c.setTransition(next.id, "white")
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
                 // audio rows
                 seq.audio.forEachIndexed { ti, track ->
                     var a = 0L
-                    val y = TL_RULER + TL_TEXT + TL_VIDEO + TL_AUDIO * ti
+                    val y = TL_RULER + TL_TEXT + TL_VIDEO + TL_VAUDIO + TL_AUDIO * ti
                     track.forEach { clip ->
                         ClipBlock(c, clip, a, y, TL_AUDIO, if (ti == 0) TrackAudio else TrackAudio2, false, menuFor, { menuFor = it }, onSpeed, onTrim)
                         a += clip.durMs

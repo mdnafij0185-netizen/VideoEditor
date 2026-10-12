@@ -91,7 +91,7 @@ class ProjectStore(context: Context) {
         return files.mapNotNull { f ->
             try {
                 val p = json.decodeFromString<Project>(f.readText())
-                if (p.seqs.isEmpty()) p.copy(seqs = listOf(Seq())) else p
+                if (p.seqs.isEmpty()) p.copy(seqs = listOf(Seq())) else p.copy(seqs = p.seqs.map { it.normalized() })
             } catch (e: Exception) {
                 null
             }

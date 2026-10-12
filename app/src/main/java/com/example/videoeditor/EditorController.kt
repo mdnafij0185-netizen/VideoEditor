@@ -21,8 +21,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.abs
 
 class DragState(val media: MediaRef, val pos: Offset)
+
+/** One animated parameter of the selected object, as shown in the Keyframes panel. */
+class PEntry(
+    val label: String,
+    val param: Param,
+    val originMs: Long,
+    val edit: ((Param) -> Param) -> Unit
+)
 
 class EditorController(
     private val context: Context,
@@ -38,6 +47,7 @@ class EditorController(
     var canRedo by mutableStateOf(false)
     var selectedClipId by mutableStateOf<String?>(null)
     var selectedTextId by mutableStateOf<String?>(null)
+    var selectedAdjId by mutableStateOf<String?>(null)
     var toast by mutableStateOf<Msg?>(null)
     var razor by mutableStateOf(false)
     var zoom by mutableFloatStateOf(60f)
@@ -49,13 +59,12 @@ class EditorController(
     var tlW = 0f
     var tlH = 0f
     var scrollPx = 0
+    var scrollYpx = 0
     var density = 1f
 
     val player: ExoPlayer = ExoPlayer.Builder(context).build()
-    val audioPlayers: List<ExoPlayer> = listOf(
-        ExoPlayer.Builder(context).build(),
-        ExoPlayer.Builder(context).build()
-    )
+    private val audioPool = HashMap<String, ExoPlayer>()
+    private val audioSig = HashMap<String, String>()
     val sourcePlayer: ExoPlayer = ExoPlayer.Builder(context).build()
 
     var isPlaying by mutableStateOf(false)
@@ -85,11 +94,6 @@ class EditorController(
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
                 isPlaying = isPlayingNow
-                syncAudioPlay()
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                syncAudioPlay()
             }
 
             override fun onTracksChanged(tracks: Tracks) {
@@ -158,9 +162,9 @@ class EditorController(
     private fun liveSeq(t: (Seq) -> Seq) = liveEdit(upd(t))
 
     private fun mapClips(s: Seq, f: (Clip) -> List<Clip>): Seq =
-        s.copy(video = s.video.flatMap(f), audio = s.audio.map { track -> track.flatMap(f) })
+        s.copy(video = s.video.flatMap(f), audio = s.audio.map { track -> normalizeTrack(track.flatMap(f)) })
 
-    // ---------- playlists ----------
+    // ---------- video playlist ----------
     fun rebuildVideo() {
         val clips = seq.video
         if (clips.isEmpty()) {
@@ -177,28 +181,45 @@ class EditorController(
         applyQuality()
     }
 
-    fun rebuildAudio(track: Int) {
-        val a = seq.audio.getOrNull(track) ?: emptyList()
-        val p = audioPlayers[track]
-        if (a.isEmpty()) {
-            p.clearMediaItems()
-            return
+    // ---------- audio: one player per audio clip, started when the playhead reaches it ----------
+    fun syncAudioPool() {
+        val clips = seq.audio.flatten()
+        val ids = clips.map { it.id }.toSet()
+        val gone = audioPool.keys.filter { it !in ids }
+        for (id in gone) {
+            audioPool.remove(id)?.release()
+            audioSig.remove(id)
         }
-        val totalA = a.sumOf { it.durMs }
-        val (i, o) = locate(a, globalMs.coerceAtMost(totalA - 1).coerceAtLeast(0L))
-        p.setMediaItems(a.map { mediaItemOf(it) }, i, o)
-        p.prepare()
-        syncAudioPlay()
+        for (c in clips) {
+            val sig = c.uri + "|" + c.inMs + "|" + c.outMs
+            val p = audioPool.getOrPut(c.id) { ExoPlayer.Builder(context).build() }
+            if (audioSig[c.id] != sig) {
+                audioSig[c.id] = sig
+                p.setMediaItem(mediaItemOf(c))
+                p.prepare()
+                p.playWhenReady = false
+            }
+        }
     }
 
-    private fun syncAudioPlay() {
-        for (t in 0..1) {
-            val a = seq.audio.getOrNull(t) ?: emptyList()
-            val totalA = a.sumOf { it.durMs }
-            audioPlayers[t].playWhenReady = player.playWhenReady &&
-                    player.playbackState != Player.STATE_ENDED &&
-                    a.isNotEmpty() &&
-                    globalMs < totalA
+    private fun updateAudio() {
+        val playing = player.playWhenReady && player.playbackState != Player.STATE_ENDED && seq.video.isNotEmpty()
+        for (c in seq.audio.flatten()) {
+            val p = audioPool[c.id] ?: continue
+            val local = globalMs - c.startMs
+            val inside = local >= 0L && local < c.durMs
+            val g = c.fx.gainAt(local.coerceAtLeast(0L)).coerceAtMost(1f)
+            if (p.volume != g) p.volume = g
+            if (playing && inside) {
+                if (!p.playWhenReady) {
+                    p.seekTo(local)
+                    p.playWhenReady = true
+                } else if (abs(p.currentPosition - local) > 300L) {
+                    p.seekTo(local)
+                }
+            } else if (p.playWhenReady) {
+                p.playWhenReady = false
+            }
         }
     }
 
@@ -239,23 +260,11 @@ class EditorController(
                 if (player.playbackParameters.speed != sp) player.setPlaybackSpeed(sp)
                 val within = (player.currentPosition / sp).toLong().coerceIn(0L, clips[idx].durMs)
                 globalMs = (startOf(clips, idx) + within).coerceAtMost(seq.totalMs)
+                val g = clips[idx].fx.gainAt(within).coerceAtMost(1f)
+                if (player.volume != g) player.volume = g
             }
         }
-        val vc = seq.video
-        if (vc.isNotEmpty() && player.mediaItemCount == vc.size) {
-            val vi = player.currentMediaItemIndex.coerceIn(0, vc.size - 1)
-            val g = gainOf(vc[vi].fx).coerceAtMost(1f)
-            if (player.volume != g) player.volume = g
-        }
-        for (k in 0..1) {
-            val ac = seq.audio.getOrNull(k) ?: continue
-            val ap = audioPlayers[k]
-            if (ac.isNotEmpty() && ap.mediaItemCount == ac.size) {
-                val ai = ap.currentMediaItemIndex.coerceIn(0, ac.size - 1)
-                val g = gainOf(ac[ai].fx).coerceAtMost(1f)
-                if (ap.volume != g) ap.volume = g
-            }
-        }
+        updateAudio()
         if (sourceMedia != null) {
             srcPos = sourcePlayer.currentPosition
             if (srcPlaying && srcPos >= srcOut) sourcePlayer.pause()
@@ -274,21 +283,6 @@ class EditorController(
             val (i, o) = locate(clips, t)
             player.seekTo(i, (o * clips[i].speed).toLong())
         }
-        for (k in 0..1) seekAudio(k, t)
-    }
-
-    private fun seekAudio(track: Int, t: Long) {
-        val a = seq.audio.getOrNull(track) ?: return
-        val p = audioPlayers[track]
-        if (a.isEmpty() || p.mediaItemCount != a.size) return
-        val totalA = a.sumOf { it.durMs }
-        if (t >= totalA) {
-            p.playWhenReady = false
-            return
-        }
-        val (i, o) = locate(a, t)
-        p.seekTo(i, o)
-        syncAudioPlay()
     }
 
     fun togglePlay() {
@@ -296,17 +290,15 @@ class EditorController(
         val playing = player.playWhenReady && player.playbackState != Player.STATE_ENDED
         if (playing) {
             player.pause()
-            audioPlayers.forEach { it.pause() }
         } else {
             if (player.playbackState == Player.STATE_ENDED) seekGlobal(0L)
             player.play()
-            syncAudioPlay()
         }
     }
 
     fun pauseAll() {
         player.pause()
-        audioPlayers.forEach { it.pause() }
+        audioPool.values.forEach { it.playWhenReady = false }
         sourcePlayer.pause()
     }
 
@@ -335,12 +327,15 @@ class EditorController(
     private fun place(clip: Clip, isAudio: Boolean, track: Int, atMs: Long?) {
         editSeq { s ->
             if (isAudio) {
-                val t = track.coerceIn(0, s.audio.size - 1)
-                val list = s.audio[t]
-                val idx = if (atMs == null) list.size else insertIndexAt(list, atMs)
-                s.copy(audio = s.audio.mapIndexed { i, l ->
-                    if (i == t) l.toMutableList().apply { add(idx, clip) } else l
-                })
+                val t = track.coerceIn(0, (s.audio.size - 1).coerceAtLeast(0))
+                val list = s.audio.getOrNull(t) ?: emptyList()
+                val start = (atMs ?: (list.maxOfOrNull { it.startMs + it.durMs } ?: 0L)).coerceAtLeast(0L)
+                val placed = clip.copy(startMs = start)
+                if (s.audio.isEmpty()) {
+                    s.copy(audio = listOf(listOf(placed)))
+                } else {
+                    s.copy(audio = s.audio.mapIndexed { i, l -> if (i == t) normalizeTrack(l + placed) else l })
+                }
             } else {
                 val idx = if (atMs == null) s.video.size else insertIndexAt(s.video, atMs)
                 s.copy(video = s.video.toMutableList().apply { add(idx, clip) })
@@ -378,20 +373,30 @@ class EditorController(
         if (p.x < tlLeft || p.x > tlLeft + tlW || p.y < tlTop || p.y > tlTop + tlH) return
         val xContent = p.x - tlLeft + scrollPx
         val ms = (xContent / (zoom * density) * 1000f).toLong()
-        val yDp = (p.y - tlTop) / density
-        val track = if (yDp > TL_AUDIO2_TOP_DP) 1 else 0
+        val rowsY = (p.y - tlTop) / density - TL_RULER_DP + scrollYpx / density
+        val n = seq.audio.size
+        val track = if (n == 0) 0 else ((rowsY - TL_AUDIO_TOP_DP) / TL_AUDIO_DP).toInt().coerceIn(0, n - 1)
         addMedia(m, track, ms)
+        if (m.isAudio && n == 0) toast = Msg("নতুন অডিও ট্র্যাক তৈরি হয়েছে", "A new audio track was created")
     }
 
     // ---------- selection ----------
     fun selectClip(id: String) {
         selectedClipId = id
         selectedTextId = null
+        selectedAdjId = null
     }
 
     fun selectText(id: String) {
         selectedTextId = id
         selectedClipId = null
+        selectedAdjId = null
+    }
+
+    fun selectAdj(id: String) {
+        selectedAdjId = id
+        selectedClipId = null
+        selectedTextId = null
     }
 
     fun selectedVideoClip(): Clip? = seq.video.find { it.id == selectedClipId }
@@ -403,10 +408,33 @@ class EditorController(
 
     fun selectedText(): TextClip? = seq.texts.find { it.id == selectedTextId }
 
-    fun localTime(clip: Clip): Long {
-        val idx = seq.video.indexOfFirst { it.id == clip.id }
-        if (idx < 0) return 0L
-        return (globalMs - startOf(seq.video, idx)).coerceIn(0L, clip.durMs)
+    fun selectedAdj(): AdjClip? = seq.adj.find { it.id == selectedAdjId }
+
+    /** The effect stack of the selected clip or adjustment layer. */
+    fun selectedFx(): Fx? = selectedAdj()?.fx ?: selectedAnyClip()?.fx
+
+    fun clipStartMs(clip: Clip): Long {
+        val i = seq.video.indexOfFirst { it.id == clip.id }
+        return if (i >= 0) startOf(seq.video, i) else clip.startMs
+    }
+
+    fun localTime(clip: Clip): Long = (globalMs - clipStartMs(clip)).coerceIn(0L, clip.durMs)
+
+    /** Time of the playhead inside the selected clip or adjustment layer. */
+    fun selectedLocalTime(): Long {
+        val a = selectedAdj()
+        if (a != null) return (globalMs - a.startMs).coerceIn(0L, a.durMs)
+        val c = selectedAnyClip() ?: return 0L
+        return localTime(c)
+    }
+
+    fun selectedOriginMs(): Long {
+        val a = selectedAdj()
+        if (a != null) return a.startMs
+        val t = selectedText()
+        if (t != null) return t.startMs
+        val c = selectedAnyClip() ?: return 0L
+        return clipStartMs(c)
     }
 
     // ---------- clip operations ----------
@@ -418,7 +446,7 @@ class EditorController(
         }
         val cutSrc = c.inMs + (off * c.speed).toLong()
         val left = c.copy(outMs = cutSrc)
-        val right = c.copy(id = newId(), inMs = cutSrc, fx = c.fx.shifted(off))
+        val right = c.copy(id = newId(), inMs = cutSrc, startMs = c.startMs + off, fx = c.fx.shifted(off))
         editSeq { s -> mapClips(s) { if (it.id == id) listOf(left, right) else listOf(it) } }
         selectClip(right.id)
     }
@@ -432,7 +460,7 @@ class EditorController(
 
     fun duplicateClip(id: String) {
         val c = findClip(id) ?: return
-        val copy = c.copy(id = newId())
+        val copy = c.copy(id = newId(), startMs = c.startMs + c.durMs)
         editSeq { s -> mapClips(s) { if (it.id == id) listOf(it, copy) else listOf(it) } }
         selectClip(copy.id)
     }
@@ -443,6 +471,16 @@ class EditorController(
     }
 
     fun duplicateSelected() {
+        val tid = selectedTextId
+        if (tid != null) {
+            duplicateText(tid)
+            return
+        }
+        val aid = selectedAdjId
+        if (aid != null) {
+            duplicateAdj(aid)
+            return
+        }
         val id = selectedClipId
         if (id == null) {
             toast = Msg("আগে একটা ক্লিপ সিলেক্ট করুন", "Select a clip first")
@@ -455,6 +493,11 @@ class EditorController(
         val tid = selectedTextId
         if (tid != null) {
             deleteText(tid)
+            return
+        }
+        val aid = selectedAdjId
+        if (aid != null) {
+            deleteAdj(aid)
             return
         }
         val id = selectedClipId
@@ -478,15 +521,156 @@ class EditorController(
         }
     }
 
-    // ---------- effects ----------
-    private fun liveFx(f: (Fx) -> Fx) {
-        val id = selectedClipId ?: return
-        liveSeq { sq -> mapClips(sq) { if (it.id == id) listOf(it.copy(fx = f(it.fx))) else listOf(it) } }
+    /** Detaches the audio of a video clip onto its own audio track at the same time. */
+    fun unlinkAudio(id: String) {
+        val idx = seq.video.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        val c = seq.video[idx]
+        val start = startOf(seq.video, idx)
+        val a = Clip(
+            mediaId = c.mediaId, uri = c.uri, name = c.name, srcDurMs = c.srcDurMs,
+            inMs = c.inMs, outMs = c.outMs, speed = c.speed, startMs = start,
+            fx = Fx(
+                volOn = c.fx.volOn, vol = c.fx.vol, eqOn = c.fx.eqOn, eqFreq = c.fx.eqFreq,
+                eqGain = c.fx.eqGain, eqQ = c.fx.eqQ, denoiseOn = c.fx.denoiseOn, denoise = c.fx.denoise
+            )
+        )
+        editSeq { s ->
+            val free = s.audio.indexOfFirst { tr -> tr.none { o -> o.startMs < start + a.durMs && o.startMs + o.durMs > start } }
+            val audio = if (free >= 0) {
+                s.audio.mapIndexed { i, l -> if (i == free) normalizeTrack(l + a) else l }
+            } else {
+                s.audio + listOf(listOf(a))
+            }
+            s.copy(
+                audio = audio,
+                video = s.video.map {
+                    if (it.id == id) it.copy(fx = it.fx.copy(volOn = true, vol = Param(-80f), off = it.fx.off - Eff.VOLUME.name)) else it
+                }
+            )
+        }
+        toast = Msg("অডিও আলাদা হয়েছে (Unlink)", "Audio unlinked onto its own track")
     }
 
-    private fun editFx(f: (Fx) -> Fx) {
-        val id = selectedClipId ?: return
-        editSeq { sq -> mapClips(sq) { if (it.id == id) listOf(it.copy(fx = f(it.fx))) else listOf(it) } }
+    // ---------- audio tracks ----------
+    fun addAudioTrack() {
+        editSeq { it.copy(audio = it.audio + listOf(emptyList<Clip>())) }
+    }
+
+    fun removeAudioTrack(i: Int) {
+        editSeq { s -> s.copy(audio = s.audio.filterIndexed { idx, _ -> idx != i }) }
+    }
+
+    private fun snapCandidates(ignoreId: String): List<Long> {
+        val s = seq
+        val out = mutableListOf(0L, globalMs)
+        var acc = 0L
+        s.video.forEach {
+            out.add(acc)
+            acc += it.durMs
+            out.add(acc)
+        }
+        s.audio.flatten().filter { it.id != ignoreId }.forEach {
+            out.add(it.startMs)
+            out.add(it.startMs + it.durMs)
+        }
+        s.texts.filter { it.id != ignoreId }.forEach {
+            out.add(it.startMs)
+            out.add(it.startMs + it.durMs)
+        }
+        s.adj.filter { it.id != ignoreId }.forEach {
+            out.add(it.startMs)
+            out.add(it.startMs + it.durMs)
+        }
+        return out
+    }
+
+    /** Snaps a start time so the start or the end lands on a nearby edge (within about 10 px). */
+    fun snapStart(start: Long, dur: Long, ignoreId: String): Long {
+        val thr = (10f / (zoom * density) * 1000f).toLong().coerceAtLeast(30L)
+        var best = start
+        var bestD = thr + 1
+        for (c in snapCandidates(ignoreId)) {
+            val d1 = abs(c - start)
+            if (d1 < bestD) {
+                bestD = d1
+                best = c
+            }
+            val d2 = abs(c - (start + dur))
+            if (d2 < bestD) {
+                bestD = d2
+                best = c - dur
+            }
+        }
+        return best.coerceAtLeast(0L)
+    }
+
+    /** Moves an audio clip by deltaMs and optionally to a neighbouring audio track. */
+    fun moveAudioClip(id: String, newStart: Long, trackDelta: Int) {
+        liveSeq { s ->
+            var from = -1
+            var clip: Clip? = null
+            s.audio.forEachIndexed { i, tr -> tr.find { it.id == id }?.let { from = i; clip = it } }
+            val c = clip
+            if (c == null || from < 0) {
+                s
+            } else {
+                val to = (from + trackDelta).coerceIn(0, s.audio.size - 1)
+                val moved = c.copy(startMs = newStart.coerceAtLeast(0L))
+                s.copy(audio = s.audio.mapIndexed { i, tr ->
+                    when {
+                        i == to -> normalizeTrack(tr.filter { it.id != id } + moved)
+                        i == from -> tr.filter { it.id != id }
+                        else -> tr
+                    }
+                })
+            }
+        }
+    }
+
+    fun moveText(id: String, newStart: Long) {
+        liveSeq { s -> s.copy(texts = s.texts.map { if (it.id == id) it.copy(startMs = newStart.coerceAtLeast(0L)) else it }) }
+    }
+
+    fun moveAdj(id: String, newStart: Long) {
+        liveSeq { s -> s.copy(adj = s.adj.map { if (it.id == id) it.copy(startMs = newStart.coerceAtLeast(0L)) else it }) }
+    }
+
+    fun setAdjDuration(id: String, dur: Long) {
+        liveSeq { s -> s.copy(adj = s.adj.map { if (it.id == id) it.copy(durMs = dur.coerceAtLeast(200L)) else it }) }
+    }
+
+    // ---------- adjustment layers ----------
+    fun addAdjustment() {
+        val dur = if (seq.totalMs > 0L) minOf(5000L, seq.totalMs) else 5000L
+        val a = AdjClip(startMs = globalMs.coerceAtLeast(0L), durMs = dur)
+        editSeq { it.copy(adj = it.adj + a) }
+        selectAdj(a.id)
+        toast = Msg("Adjustment Layer যোগ হয়েছে, Effects থেকে ইফেক্ট দিন", "Adjustment layer added. Add effects from Effects")
+    }
+
+    fun duplicateAdj(id: String) {
+        val a = seq.adj.find { it.id == id } ?: return
+        val copy = a.copy(id = newId(), startMs = a.startMs + a.durMs)
+        editSeq { it.copy(adj = it.adj + copy) }
+        selectAdj(copy.id)
+    }
+
+    fun deleteAdj(id: String) {
+        editSeq { s -> s.copy(adj = s.adj.filter { it.id != id }) }
+        if (selectedAdjId == id) selectedAdjId = null
+    }
+
+    // ---------- effects (clips and adjustment layers share one effect stack) ----------
+    private fun mutFx(live: Boolean, f: (Fx) -> Fx) {
+        val aid = selectedAdjId
+        val cid = selectedClipId
+        val change: (Seq) -> Seq = when {
+            aid != null -> { s -> s.copy(adj = s.adj.map { if (it.id == aid) it.copy(fx = f(it.fx)) else it }) }
+            cid != null -> { s -> mapClips(s) { if (it.id == cid) listOf(it.copy(fx = f(it.fx))) else listOf(it) } }
+            else -> return
+        }
+        if (live) liveSeq(change) else editSeq(change)
     }
 
     fun addEffect(e: Eff) {
@@ -503,31 +687,23 @@ class EditorController(
             }
             return
         }
-        val sel = selectedAnyClip()
-        if (sel == null) {
-            toast = Msg("আগে টাইমলাইনে একটা ক্লিপ সিলেক্ট করুন", "Select a clip on the timeline first")
+        val adj = selectedAdj()
+        val clip = selectedAnyClip()
+        if (adj == null && clip == null) {
+            toast = Msg("আগে টাইমলাইনে একটা ক্লিপ বা Adjustment Layer সিলেক্ট করুন", "Select a clip or adjustment layer first")
             return
         }
         val audioEffect = e == Eff.DENOISE || e == Eff.VOLUME || e == Eff.EQ
-        val isVideo = seq.video.any { it.id == sel.id }
-        if (!audioEffect && !isVideo) {
+        val isVideo = clip != null && seq.video.any { it.id == clip.id }
+        if (adj != null && (audioEffect || e == Eff.CROP)) {
+            toast = Msg("এই ইফেক্ট Adjustment Layer-এ চলে না", "This effect is not available on an adjustment layer")
+            return
+        }
+        if (clip != null && !audioEffect && !isVideo) {
             toast = Msg("এই ইফেক্ট শুধু ভিডিও ক্লিপে", "This effect needs a video clip")
             return
         }
-        editFx { fx ->
-            when (e) {
-                Eff.TRANSFORM -> fx.copy(transformOn = true)
-                Eff.FLIP_H -> fx.copy(flipH = true)
-                Eff.FLIP_V -> fx.copy(flipV = true)
-                Eff.BLUR -> fx.copy(blurOn = true)
-                Eff.CROP -> fx.copy(cropOn = true)
-                Eff.BW -> fx.copy(bwOn = true)
-                Eff.COLOR -> fx.copy(colorOn = true)
-                Eff.DENOISE -> fx.copy(denoiseOn = true)
-                Eff.VOLUME -> fx.copy(volOn = true)
-                Eff.EQ -> fx.copy(eqOn = true)
-            }
-        }
+        mutFx(false) { it.withFlag(e, true).let { f -> f.copy(off = f.off - e.name) } }
         toast = Msg("ইফেক্ট যোগ হয়েছে, Controls প্যানেলে দেখুন", "Effect added. See the Controls panel")
     }
 
@@ -537,64 +713,32 @@ class EditorController(
             if (e == Eff.BW) updateText(tx.id, false) { it.copy(bw = false) }
             return
         }
-        editFx { fx ->
-            when (e) {
-                Eff.TRANSFORM -> fx.copy(transformOn = false, scale = Param(100f), posX = Param(0f), posY = Param(0f))
-                Eff.FLIP_H -> fx.copy(flipH = false)
-                Eff.FLIP_V -> fx.copy(flipV = false)
-                Eff.BLUR -> fx.copy(blurOn = false, blur = Param(10f))
-                Eff.CROP -> fx.copy(cropOn = false, cropL = 0f, cropR = 0f, cropT = 0f, cropB = 0f)
-                Eff.BW -> fx.copy(bwOn = false)
-                Eff.COLOR -> fx.copy(colorOn = false, bright = 0f, contrast = 0f, sat = 0f, exposure = 0f, temp = 0f, tint = 0f)
-                Eff.DENOISE -> fx.copy(denoiseOn = false)
-                Eff.VOLUME -> fx.copy(volOn = false, volDb = 0f)
-                Eff.EQ -> fx.copy(eqOn = false, eqGain = 0f)
-            }
-        }
+        mutFx(false) { it.resetEffect(e).withFlag(e, false).let { f -> f.copy(off = f.off - e.name) } }
+    }
+
+    fun resetEffect(e: Eff) = mutFx(false) { it.resetEffect(e) }
+
+    fun setEffectEnabled(e: Eff, enabled: Boolean) = mutFx(false) { f ->
+        f.copy(off = if (enabled) f.off - e.name else (f.off - e.name) + e.name)
     }
 
     fun muteClipAudio(id: String) {
         editSeq { sq ->
             mapClips(sq) {
-                if (it.id == id) listOf(it.copy(fx = it.fx.copy(volOn = true, volDb = -80f))) else listOf(it)
+                if (it.id == id) listOf(it.copy(fx = it.fx.copy(volOn = true, vol = Param(-80f), off = it.fx.off - Eff.VOLUME.name))) else listOf(it)
             }
         }
         toast = Msg("অডিও বন্ধ হয়েছে (Controls-এ Volume বাড়ালে ফিরবে)", "Audio muted (raise Volume in Controls to undo)")
     }
 
-    fun setParam(w: P, v: Float, t: Long) = liveFx { it.mapParam(w) { p -> p.withValueAt(t, v) } }
-    fun toggleKeyframe(w: P, t: Long) = editFx { it.mapParam(w) { p -> p.toggleKeyframeAt(t) } }
-    fun setDenoise(v: Float) = liveFx { it.copy(denoise = v) }
-    fun setVolume(v: Float) = liveFx { it.copy(volDb = v) }
-    fun setEq(freq: Float? = null, gain: Float? = null, q: Float? = null) = liveFx {
+    fun setParam(w: P, v: Float, t: Long) = mutFx(true) { it.mapParam(w) { p -> p.withValueAt(t, v) } }
+    fun toggleKeyframe(w: P, t: Long) = mutFx(false) { it.mapParam(w) { p -> p.toggleKeyframeAt(t) } }
+    fun setDenoise(v: Float) = mutFx(true) { it.copy(denoise = v) }
+    fun setEq(freq: Float? = null, gain: Float? = null, q: Float? = null) = mutFx(true) {
         it.copy(eqFreq = freq ?: it.eqFreq, eqGain = gain ?: it.eqGain, eqQ = q ?: it.eqQ)
     }
-    fun setCrop(l: Float? = null, r: Float? = null, t: Float? = null, b: Float? = null) = liveFx {
-        it.copy(
-            cropL = l ?: it.cropL, cropR = r ?: it.cropR,
-            cropT = t ?: it.cropT, cropB = b ?: it.cropB
-        )
-    }
 
-    fun setColor(
-        bright: Float? = null,
-        contrast: Float? = null,
-        sat: Float? = null,
-        exposure: Float? = null,
-        temp: Float? = null,
-        tint: Float? = null
-    ) = liveFx {
-        it.copy(
-            bright = bright ?: it.bright,
-            contrast = contrast ?: it.contrast,
-            sat = sat ?: it.sat,
-            exposure = exposure ?: it.exposure,
-            temp = temp ?: it.temp,
-            tint = tint ?: it.tint
-        )
-    }
-
-    /** Pinch / drag on the preview: moves or zooms the selected text or video clip. */
+    /** Pinch / drag on the preview: moves or zooms the selected text, clip or adjustment layer. */
     fun previewGesture(zoomBy: Float, panXPct: Float, panYPct: Float) {
         val tc = selectedText()
         if (tc != null) {
@@ -609,9 +753,12 @@ class EditorController(
             liveDeadline = SystemClock.uptimeMillis() + 600L
             return
         }
-        val cl = selectedVideoClip() ?: return
-        val t = localTime(cl)
-        liveFx { fx ->
+        if (selectedAdjId == null) {
+            val cl = selectedVideoClip() ?: return
+            if (cl.id.isEmpty()) return
+        }
+        val t = selectedLocalTime()
+        mutFx(true) { fx ->
             fx.copy(
                 transformOn = true,
                 scale = fx.scale.withValueAt(t, (fx.scale.at(t) * zoomBy).coerceIn(10f, 400f)),
@@ -619,6 +766,32 @@ class EditorController(
                 posY = fx.posY.withValueAt(t, (fx.posY.at(t) + panYPct).coerceIn(-100f, 100f))
             )
         }
+    }
+
+    /** Animated parameters of the selected object (for the Keyframes panel). */
+    fun paramEntries(): List<PEntry> {
+        val out = mutableListOf<PEntry>()
+        val tx = selectedText()
+        if (tx != null) {
+            for (w in TP.values()) {
+                val p = tx.param(w)
+                if (p.kfs.isNotEmpty()) {
+                    out.add(PEntry("Text " + w.name.lowercase(), p, tx.startMs) { f ->
+                        updateText(tx.id, false) { it.mapParam(w, f) }
+                    })
+                }
+            }
+            return out
+        }
+        val fx = selectedFx() ?: return out
+        val origin = selectedOriginMs()
+        for (w in P.values()) {
+            val p = fx.param(w)
+            if (p.kfs.isNotEmpty()) {
+                out.add(PEntry(w.label, p, origin) { f -> mutFx(false) { it.mapParam(w, f) } })
+            }
+        }
+        return out
     }
 
     // ---------- text ----------
@@ -677,6 +850,7 @@ class EditorController(
         globalMs = 0L
         selectedClipId = null
         selectedTextId = null
+        selectedAdjId = null
     }
 
     fun renameSeq(name: String) {
@@ -750,7 +924,8 @@ class EditorController(
         } catch (e: Exception) {
         }
         player.release()
-        audioPlayers.forEach { it.release() }
+        audioPool.values.forEach { it.release() }
+        audioPool.clear()
         sourcePlayer.release()
     }
 }
